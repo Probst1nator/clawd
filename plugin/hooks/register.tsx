@@ -102,7 +102,7 @@ const ACT_WHAT: Partial<Record<ActKind, string>> = {
   wake: 'wakes up',
   carry: 'fetches a brick for the pile',
   kick: 'kicks the brick pile over',
-  read: 'holds up a scroll and squints at it',
+  read: 'holds up a scroll and looks down at it',
 }
 
 const isClawdOn = atom({ plugin: 'clawd', key: 'isClawdOn' } as const, true)

@@ -54,7 +54,7 @@ const QUAD = [
 
 type Shape = 'normal' | 'squash' | 'stretch' | 'flat'
 type Arms = 'out' | 'up' | 'down' | 'wave' | 'flail' | 'none'
-type Eyes = 'open' | 'closed' | 'wide' | 'squint' // squint: reading; no routine or emote sets it
+type Eyes = 'open' | 'closed' | 'wide' | 'down' // down: reading, at the scroll; no routine or emote sets it
 type Size = { w: number; h: number; eyes: [number, number]; eyeRow: number; armRow: number }
 
 // Body sizes in sub-pixels. `normal` is the logo: 12 x 4 with eye holes at
@@ -1234,11 +1234,11 @@ function runAct(w: World, c: Body, a: Act): boolean {
       return e > a.dur
     }
     case 'read': {
-      // Holds a scroll in front and squints at it. onTool stretches dur.
+      // Holds a scroll in front and looks down at it. onTool stretches dur.
       a.dur ??= 2
       if (isAirborne(c)) return e > a.dur
       c.reading = true
-      c.eyes = 'squint'
+      c.eyes = 'down'
       c.look = 1
       return e > a.dur
     }
@@ -1743,16 +1743,21 @@ function drawWorn(w: World, c: Body, look: Emote, put: Put): void {
   const eyes = w.t >= c.blinkAt && w.t < c.blinkAt + 0.12 ? 'closed' : c.eyes
   const holes = new Set<string>()
   if (eyes !== 'closed') {
+    const eyePixels: [number, number][] = []
     rows.forEach((line, ey) => {
       for (let ex = 0; ex < line.length; ex++) {
-        if (line[ex] !== 'o') continue
-        const hx = ex + Math.max(-1, Math.min(1, c.look))
-        const hy = c.lookUp && ey > 0 ? ey - 1 : ey
-        holes.add(`${hx},${hy}`)
-        if (eyes === 'wide') holes.add(`${hx},${hy > 0 ? hy - 1 : hy + 1}`)
-        if (eyes === 'squint') holes.add(`${hx + (hx < sw / 2 ? 1 : -1)},${hy}`)
+        if (line[ex] === 'o') eyePixels.push([ex + Math.max(-1, Math.min(1, c.look)), c.lookUp && ey > 0 ? ey - 1 : ey])
       }
     })
+    // Reading, the eyes look down a row, at their size, where the shape has
+    // body under them and under that, so an eye never opens into a gap.
+    const isBody = (ch: string | undefined) => ch === '#' || ch === 'o' || ch === '+'
+    const down = eyes === 'down' && eyePixels.every(([x, y]) => isBody(rows[y + 1]?.[x]) && isBody(rows[y + 2]?.[x]))
+    for (const [hx, ey] of eyePixels) {
+      const hy = down ? ey + 1 : ey
+      holes.add(`${hx},${hy}`)
+      if (eyes === 'wide') holes.add(`${hx},${hy > 0 ? hy - 1 : hy + 1}`)
+    }
   }
   // The lean moves the rows above the eyes, so it never splits an eye.
   const eyeTop = rows.findIndex(line => line.includes('o'))
@@ -1867,13 +1872,13 @@ function drawBody(w: World, c: Body, put: Put): void {
   const eyes = w.t >= c.blinkAt && w.t < c.blinkAt + 0.12 ? 'closed' : c.eyes
   const holes = new Set<string>()
   if (eyes !== 'closed') {
+    // Reading, the eyes look down a row where a row of body stays under them.
+    const isDown = eyes === 'down' && s.eyeRow + 2 < s.h
     for (const ex of s.eyes) {
       const hx = ex + Math.max(-1, Math.min(1, c.look))
-      const hy = c.lookUp && s.eyeRow > 0 ? s.eyeRow - 1 : s.eyeRow
+      const hy = c.lookUp && s.eyeRow > 0 ? s.eyeRow - 1 : isDown ? s.eyeRow + 1 : s.eyeRow
       holes.add(`${hx},${hy}`)
       if (eyes === 'wide') holes.add(`${hx},${hy > 0 ? hy - 1 : hy + 1}`)
-      // A mini's eyes are too close together for a slit.
-      if (eyes === 'squint' && !c.isMini) holes.add(`${hx + (hx < s.w / 2 ? 1 : -1)},${hy}`)
     }
   }
   for (let r = 0; r < s.h; r++) {
