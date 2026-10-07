@@ -3,6 +3,8 @@
 A mod for [Claude Code](https://code.claude.com): Clawd, the small creature from the
 Claude Code banner, runs around in a strip above your prompt and reacts to the session.
 
+![The strip above the prompt during a session](demo.gif)
+
 There is also a version in which Clawd is the MatSci octopus:
 [AutomatedAlchemy/clawd-matsci](https://github.com/AutomatedAlchemy/clawd-matsci).
 
