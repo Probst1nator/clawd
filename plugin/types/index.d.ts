@@ -3,6 +3,7 @@ export type ClawdState = {
   isClawdOn: boolean
   isClawdTall: boolean
   isTracing: boolean
+  isDebugging: boolean
   clawdMenu: {
     title: string
     note: string
@@ -22,6 +23,8 @@ declare module 'claude-code' {
       isClawdTall: boolean
       /** Each pick goes to picks/<session id>.jsonl in the data folder (/clawd trace [off]). */
       isTracing: boolean
+      /** Each pick's whole reply, tokens and outcome go to the transcript (/clawd debug [on|off]). */
+      isDebugging: boolean
       /** The framed list above the prompt while a /clawd command is typed (clawd-words.ts `Menu`); null otherwise. */
       clawdMenu: {
         title: string

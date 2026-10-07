@@ -40,8 +40,11 @@ so older versions may not load it.
 | `/clawd jump 3` | play an act now, up to 5 times in a row |
 | `/clawd a1 wave` | a subagent's small Clawd plays an act |
 | `/clawd list acts` | the acts; also `made`, `emotes`, `minis` |
+| `/clawd emote <emote>` | Clawd takes an emote's look for a while |
+| `/clawd emote create`, `change`, `delete`, `preview` | make, redraw, remove or picture an emote |
 | `/clawd on`, `/clawd off` | show or hide Clawd |
 | `/clawd autopick on`, `off` | let a model choose what Clawd plays (see below) |
+| `/clawd debug` | show each autopick's whole reply in the transcript; again to stop |
 
 While you type `/clawd `, a list above the prompt shows what fits, and a space writes out
 a word that fits one name.
@@ -50,16 +53,16 @@ a word that fits one name.
 
 By default the mod makes no model calls. Clawd picks random acts by itself.
 
-`/clawd autopick on` hands that choice to a model (Sonnet). It reads what happens in the
+`/clawd autopick on` hands that choice to a model (Haiku). It reads what happens in the
 session and picks what Clawd and the small Clawds play: after each prompt and turn, and
 every 10 to 60 seconds. In a busy session that is about 100 calls an hour of about 1,500
 tokens each, and it may have Opus write up to 5 new acts or looks a day. All of it runs
 through your own Claude Code login and counts against your usage. `/clawd autopick off`
 stops it. The setting is remembered.
 
-`/clawd create <name> <what it looks like>` has Opus draw a new emote, a look Clawd takes
-for a while, and `/clawd change <emote> <what to change>` redraws one. Each runs only when
-you type it.
+`/clawd emote create <name> <what it looks like>` has Opus draw a new emote, a look Clawd
+takes for a while, and `/clawd emote change <emote> <what to change>` redraws one. Each
+runs only when you type it.
 
 ## Where it keeps things
 

@@ -14,6 +14,9 @@ const DT = TICK_MS / 1000
 const GRAVITY = 120 // sub-pixels per second squared
 export const WALK = 12 // sub-pixels per second
 const RUN = 36
+// A wiggly look's ripple: one stride per this many sub-pixels walked, twice as
+// many running, so a sprint's wave stays slower than the frames.
+const STRIDE = 8
 const EASE_S = 0.4 // an eased move takes this long to reach full speed, and to stop from it
 export const SLEEP_AFTER_S = 180 // idle seconds without any session event
 export const MINI_STALE_S = 900 // a mini whose subagent was silent this long leaves
@@ -248,6 +251,7 @@ export type Body = {
   vy: number
   facing: 1 | -1
   walked: number // distance travelled; drives the gait
+  strides: number // a wiggly look's strides taken; drives its ripple
   dustAt: number
   landedAt: number
   blinkAt: number
@@ -324,6 +328,7 @@ function newBody(id: string, color: number, isMini: boolean, x: number): Body {
     vy: 0,
     facing: 1,
     walked: 0,
+    strides: 0,
     dustAt: 0,
     landedAt: -1,
     blinkAt: 2,
@@ -1424,6 +1429,7 @@ function physics(w: World, c: Body): void {
   const before = c.x
   c.x += c.vx * DT
   c.walked += Math.abs(c.x - before)
+  c.strides += Math.abs(c.x - before) / (Math.abs(c.vx) >= RUN * 0.7 ? 2 * STRIDE : STRIDE)
   if (c.vx > 0.1) c.facing = 1
   else if (c.vx < -0.1) c.facing = -1
   if (!isAirborne(c) && Math.abs(c.vx) >= RUN * 0.7 && c.walked - c.dustAt > 7) {
@@ -1690,8 +1696,8 @@ function shapeNow(w: World, c: Body): Shape {
 // A body in an emote's look. The same motion drives it as Clawd: the shape
 // follows the jump, the eyes look and blink, the legs follow the distance
 // walked. Wiggly legs sway at the tips while standing, trail straight while
-// rising and flare out while falling. Walking, a ripple runs from the back
-// tentacle to the front one. Running, the tips trail.
+// rising and flare out while falling. Walking and running, a ripple runs from
+// the back tentacle to the front one.
 function drawWorn(w: World, c: Body, look: Emote, put: Put): void {
   const airborne = isAirborne(c)
   const speed = Math.abs(c.vx)
@@ -1714,29 +1720,33 @@ function drawWorn(w: World, c: Body, look: Emote, put: Put): void {
     if (phase === 3) legs = legs.filter((_, k) => k % 2 === 1)
   }
   // A wiggly walk ripples: a wave runs from the back tentacle to the front one, and each
-  // tip in turn lifts, reaches forward and slides back. Running, the tips trail.
+  // tip in turn lifts, reaches forward and slides back. Running, it ripples with longer
+  // strides (user, 2026-10-07: the leg animation also when it sprints; the tips trailed
+  // until then).
   const crawl = look.isWiggly && !airborne && speed > 0.5 && legLen > 0
-  const running = speed >= RUN * 0.7
   const nLegs = look.legs.length
   const swing = nLegs > 1 ? 1 / nLegs : 0 // the share of a stride a tip is lifted
   // How far leg k is through its stride, 0 to 1. The arms are k = -1 behind and k = nLegs in front.
   const stride = (k: number) => {
-    const v = c.walked / 8 - k / nLegs
+    const v = c.strides - k / nLegs
     return v - Math.floor(v)
   }
-  const lifted = (k: number) => crawl && !running && stride(k) < swing
+  const lifted = (k: number) => crawl && stride(k) < swing
   const wave = speed > 0.5 ? c.walked / 2.5 : w.t * 2.5
   const sway = (k: number, side: number): number => {
     if (!look.isWiggly) return 0
     if (airborne) return c.vy > 0 ? 0 : side
-    if (crawl) return running ? -1 : Math.round(1 - (2 * (stride(k) - swing)) / (1 - swing))
+    if (crawl) return Math.round(1 - (2 * (stride(k) - swing)) / (1 - swing))
     return Math.round(Math.sin(wave + k * 2.1))
   }
 
   const feet = ground(w) - Math.round(c.y)
   const top = feet - legLen - h + 1
   const left = Math.round(c.x - sw / 2)
-  const lean = !airborne && speed >= RUN * 0.7 ? 1 : 0
+  // Running, the top leans forward; carrying a brick on its head, the body
+  // stays upright, since its arms hang low and the lean would leave a notch
+  // at the front shoulder (user, 2026-10-07).
+  const lean = !airborne && !c.carrying && speed >= RUN * 0.7 ? 1 : 0
   const at = (lx: number, row: number, color: number) =>
     put(c.facing === 1 ? left + lx : left + sw - 1 - lx, top + row, color)
 
@@ -1780,7 +1790,7 @@ function drawWorn(w: World, c: Body, look: Emote, put: Put): void {
     const flip = Math.floor(w.t * 6) % 2 === 1
     const { up, down, raised } = look.armPoses
     // Wiggly arms curl their tips up now and then. Crawling, each curls for the first half of its stride.
-    const lift = (k: number, at: number) => (crawl ? (!running && stride(at) < 0.5 ? 1 : 0) : Math.max(0, sway(k, 0)))
+    const lift = (k: number, at: number) => (crawl ? (stride(at) < 0.5 ? 1 : 0) : Math.max(0, sway(k, 0)))
     const curl = (k: number, at: number) => look.armPoses.out.map(([dx, dy], i, all): [number, number] =>
       look.isWiggly && i === all.length - 1 ? [dx, dy - lift(k, at)] : [dx, dy])
     let back = curl(6, -1)
@@ -1864,7 +1874,10 @@ function drawBody(w: World, c: Body, put: Put): void {
   const bottom = feet - legLen
   const top = bottom - s.h + 1
   const left = Math.round(c.x - s.w / 2)
-  const lean = !airborne && speed >= RUN * 0.7 ? 1 : 0
+  // Running, the top leans forward; carrying a brick on its head, the body
+  // stays upright, since its arms hang low and the lean would leave a notch
+  // at the front shoulder (user, 2026-10-07).
+  const lean = !airborne && !c.carrying && speed >= RUN * 0.7 ? 1 : 0
   const at = (lx: number, row: number, color: number) =>
     put(c.facing === 1 ? left + lx : left + s.w - 1 - lx, top + row, color)
 

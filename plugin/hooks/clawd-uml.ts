@@ -135,7 +135,7 @@ function making(f: UmlFacts): string[] {
   return [
     '3. A new act or emote (UML activity diagram)',
     '',
-    at([3, '●  autopick'], [right, '●  /clawd create or /clawd change']),
+    at([3, '●  autopick'], [right, '●  /clawd emote create or change']),
     at([3, '▼'], [right, '│']),
     ...beside(
       [right, node(36, [`${f.pickModel} reads what happened and every`, 'name; it answers with calls, why and', 'new: an act or a look it wants'])],
@@ -175,9 +175,9 @@ function making(f: UmlFacts): string[] {
       "folder and the plugin's emotes/ afresh. The next pick offers the new",
       `name to ${f.pickModel}, and /clawd <name> and /clawd list take it at once,`,
       'without a reload. A file that fails the check is skipped. A hand-drawn',
-      "emote in the plugin wins over a model's of the same name. /clawd delete",
-      'moves an emote to old/. The data folder is clawd/ in the Claude config',
-      'folder (~/.claude), or data/ beside the plugin in a checkout.',
+      "emote in the plugin wins over a model's of the same name. /clawd emote",
+      'delete moves an emote to old/. The data folder is clawd/ in the Claude',
+      'config folder (~/.claude), or data/ beside the plugin in a checkout.',
     ]),
     'A built-in act is code: its name in ACTS and a case in runAct (clawd-sim.ts),',
     'a line in PICKABLE so models and made acts may use it, a weight in a random',

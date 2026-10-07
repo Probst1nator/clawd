@@ -14,16 +14,23 @@ export const MAX_REPEAT = 5 // `/clawd jump 3`: at most this many in a row
 export const COMMANDS: Readonly<Record<string, string>> = {
   help: 'what Clawd plays and every command; help uml draws it',
   act: 'Clawd plays an act: a move such as jump or wave',
-  emote: "Clawd takes an emote's look for a while",
+  emote: "Clawd takes an emote's look for a while; emote create, change, delete, preview",
   list: 'the names of one kind: acts, made, emotes or minis',
   on: 'show Clawd (remembered)',
   off: 'hide Clawd (remembered)',
   autopick: 'a model chooses what plays next, now; autopick on keeps it choosing',
   trace: 'write each autopick to a file; trace off stops',
-  preview: 'a PNG of an emote in every pose',
+  debug: "show each autopick's whole reply here; debug again stops",
+}
+/**
+ * What `/clawd emote` takes besides an emote's name (user, 2026-10-07: all
+ * emote work under `/clawd emote`). No emote may take one of these names.
+ */
+export const EMOTE_COMMANDS: Readonly<Record<string, string>> = {
   create: 'a model draws a new emote (uses your Claude usage)',
-  change: "a model changes an emote's look (uses your Claude usage)",
+  change: "a model changes an emote's look (uses your Claude usage); edit and modify work too",
   delete: 'remove an emote; the file goes to emotes/old/',
+  preview: 'a PNG of an emote in every pose',
 }
 /** What `/clawd list` takes. */
 export const LIST_KINDS = {
@@ -34,7 +41,8 @@ export const LIST_KINDS = {
 } as const
 export type ListKind = keyof typeof LIST_KINDS
 /** Other words for commands, taken only in full and never offered. */
-const ALIASES: Readonly<Record<string, string>> = { '?': 'help', ls: 'list' }
+export const ALIASES: Readonly<Record<string, string>> = { '?': 'help', ls: 'list', edit: 'change', modify: 'change' }
+const WHAT: Readonly<Record<string, string>> = { ...COMMANDS, ...EMOTE_COMMANDS }
 /** Commands that start a model run or remove something run only when typed in full, with why. */
 const IN_FULL: Readonly<Record<string, string>> = {
   create: 'it starts a model run',
@@ -60,7 +68,12 @@ const KIND_WORD: Record<Kind, string> = { command: '', mini: '', emote: 'emote',
 const FIRST: Kind[] = ['command', 'mini', 'emote', 'made', 'act']
 const PLAYS: Kind[] = ['act', 'made']
 const LIST_ROWS: Fit[] = Object.entries(LIST_KINDS).map(([name, what]) => ({ kind: 'command', name, what }))
+const EMOTE_ROWS: Fit[] = Object.entries(EMOTE_COMMANDS).map(([name, what]) => ({ kind: 'command', name, what }))
 const TRACE_ROWS: Fit[] = [{ kind: 'command', name: 'off', what: 'stop writing the autopicks' }]
+const DEBUG_ROWS: Fit[] = [
+  { kind: 'command', name: 'on', what: "each autopick's reply, tokens and outcome in the transcript, not sent to the model" },
+  { kind: 'command', name: 'off', what: 'stop showing them' },
+]
 const AUTOPICK_ROWS: Fit[] = [
   { kind: 'command', name: 'on', what: 'a model chooses every 10 to 60 s (remembered; uses your Claude usage)' },
   { kind: 'command', name: 'off', what: 'random acts only, no model calls (remembered)' },
@@ -80,7 +93,7 @@ function table(kinds: readonly Kind[], names: Names): Fit[] {
 export function fitsOf(word: string, rows: readonly Fit[]): Fit[] {
   const w = word.toLowerCase()
   const alias = ALIASES[w]
-  if (alias && rows.some(f => f.kind === 'command' && f.name === alias)) return [{ kind: 'command', name: w, what: COMMANDS[alias] ?? '' }]
+  if (alias && rows.some(f => f.kind === 'command' && f.name === alias)) return [{ kind: 'command', name: w, what: WHAT[alias] ?? '' }]
   const exact = rows.filter(f => f.name === w)
   if (exact.length > 0) return exact
   const starts = rows.filter(f => f.name.startsWith(w))
@@ -90,6 +103,11 @@ export function fitsOf(word: string, rows: readonly Fit[]): Fit[] {
 /** The names of these kinds a typed word fits. */
 export function namesFit(word: string, kinds: readonly Kind[], names: Names): Fit[] {
   return fitsOf(word, table(kinds, names))
+}
+
+/** After `/clawd emote`: its commands, then the emotes. */
+function emoteRows(names: Names): Fit[] {
+  return [...EMOTE_ROWS, ...table(['emote'], names)]
 }
 
 function onlyFit(word: string, rows: readonly Fit[]): Fit | undefined {
@@ -116,15 +134,26 @@ function placeAfter(before: readonly string[], names: Names): Place {
   }
   if (fit.kind === 'act' || fit.kind === 'made') return rest.length === 0 ? COUNT : END
   if (fit.kind !== 'command') return END
-  if (name === 'create') return rest.length === 0 ? { free: '<new_name> in snake_case' } : { free: '[image path] <what it looks like>' }
-  if (name === 'change' && rest.length > 0) return { free: '[image path] <what to change>' }
+  if (name === 'emote') return emotePlace(rest, names)
   if (rest.length > 0) return END
-  if (['emote', 'preview', 'change', 'delete'].includes(name)) return { rows: table(['emote'], names), of: 'emotes' }
   if (name === 'list') return { rows: LIST_ROWS, of: 'kinds' }
   if (name === 'trace') return { rows: TRACE_ROWS, of: 'words' }
+  if (name === 'debug') return { rows: DEBUG_ROWS, of: 'words' }
   if (name === 'autopick') return { rows: AUTOPICK_ROWS, of: 'words' }
   if (name === 'help') return { rows: HELP_ROWS, of: 'words' }
   return END
+}
+
+/** What comes after `/clawd emote` and these words: a command or an emote, then the command's words. */
+function emotePlace(rest: readonly string[], names: Names): Place {
+  const [first, ...more] = rest
+  if (first === undefined) return { rows: emoteRows(names), of: 'names' }
+  const fit = onlyFit(first, emoteRows(names))
+  if (!fit || fit.kind !== 'command') return END
+  const verb = ALIASES[fit.name] ?? fit.name
+  if (verb === 'create') return more.length === 0 ? { free: '<new_name> in snake_case' } : { free: '[image path] <what it looks like>' }
+  if (more.length === 0) return { rows: table(['emote'], names), of: 'emotes' }
+  return verb === 'change' ? { free: '[image path] <what to change>' } : END
 }
 
 type Word = { text: string; start: number; end: number }
@@ -177,7 +206,7 @@ export function menuFor(draft: string, cursor: number, names: Names): Menu | und
   const done = words.map(w => w.text)
   const place = placeAfter(done, names)
   if ('end' in place) return undefined
-  // At most two words: the rest of create's or change's description stays out.
+  // At most two words: an emote's name and create's or change's description stay out.
   const menu: Menu = { title: ['/clawd', ...done.slice(0, 2)].join(' '), note: '', rows: [], isOne: false, count: '', next: '' }
   if ('free' in place) return { ...menu, note: place.free }
   if ('count' in place) return { ...menu, note: `[1-${MAX_REPEAT}] times in a row` }
@@ -290,34 +319,46 @@ function actOrder(who: string, rest: readonly string[], names: Names): Order {
   )
 }
 
+/** `/clawd emote <emote>` plays it; `/clawd emote <command> ...` creates, changes, deletes or previews one. */
+function emoteOrder(rest: readonly string[], names: Names): Order {
+  const [first, ...more] = rest
+  if (first === undefined) {
+    return unclear('Clawd: which emote? /clawd emote <emote> plays one; emote create, change, delete and preview work on them. /clawd list emotes shows them.')
+  }
+  const fit = oneFit(first, emoteRows(names), '/clawd list emotes')
+  if (typeof fit === 'string') return unclear(fit)
+  if (fit.kind === 'emote') return { kind: 'play', who: 'clawd', fit, count: 1 }
+  const verb = ALIASES[fit.name] ?? fit.name
+  const reason = IN_FULL[verb]
+  if (reason && first !== fit.name) return unclear(`Clawd: type ${verb} in full; ${reason}.`)
+  if (WHOLE_EMOTE.includes(verb)) {
+    const [look] = more
+    if (look === undefined) return unclear(`Clawd: which emote? /clawd emote ${verb} <emote>${verb === 'change' ? ' <what to change>' : ''}.`)
+    if (!(look in names.emotes)) {
+      const one = onlyFit(look, table(['emote'], names))
+      return unclear(one ? `Clawd: type the emote's full name: /clawd emote ${verb} ${one.name}.` : `Clawd: there is no emote ${look}. /clawd list emotes shows them.`)
+    }
+  }
+  return { kind: 'command', name: verb, rest: more }
+}
+
 /** The words after `/clawd`, read as one order. `clawd` as the first word names Clawd, as a mini id names that mini. */
 export function orderOf(args: readonly string[], names: Names): Order {
   const words = args[0] === 'clawd' && args.length > 1 ? args.slice(1) : [...args]
   const [first, ...rest] = words
   if (first === undefined) return { kind: 'status' }
   const fit = oneFit(first, table(FIRST, names), '/clawd help')
-  if (typeof fit === 'string') return unclear(fit)
+  if (typeof fit === 'string') {
+    // These were top-level commands until 2026-10-07.
+    const verb = ALIASES[first] ?? first
+    return unclear(verb in EMOTE_COMMANDS ? `Clawd: that is /clawd emote ${verb} now.` : fit)
+  }
   if (fit.kind === 'act' || fit.kind === 'made') return { kind: 'play', who: 'clawd', fit, count: countOf(rest[0]) }
   if (fit.kind === 'emote') return { kind: 'play', who: 'clawd', fit, count: 1 }
   if (fit.kind === 'mini') return actOrder(fit.name, rest, names)
   const name = ALIASES[fit.name] ?? fit.name
-  const reason = IN_FULL[name]
-  if (reason && first !== name) return unclear(`Clawd: type ${name} in full; ${reason}.`)
-  if (WHOLE_EMOTE.includes(name)) {
-    const [look] = rest
-    if (look === undefined) return unclear(`Clawd: which emote? /clawd ${name} <emote>${name === 'change' ? ' <what to change>' : ''}.`)
-    if (!(look in names.emotes)) {
-      const fit = onlyFit(look, table(['emote'], names))
-      return unclear(fit ? `Clawd: type the emote's full name: /clawd ${name} ${fit.name}.` : `Clawd: there is no emote ${look}. /clawd list emotes shows them.`)
-    }
-  }
   if (name === 'act') return actOrder('clawd', rest, names)
-  if (name === 'emote') {
-    const [look] = rest
-    if (look === undefined) return unclear('Clawd: which emote? /clawd emote <emote>. /clawd list emotes shows them.')
-    const what = oneFit(look, table(['emote'], names), '/clawd list emotes')
-    return typeof what === 'string' ? unclear(what) : { kind: 'play', who: 'clawd', fit: what, count: 1 }
-  }
+  if (name === 'emote') return emoteOrder(rest, names)
   if (name === 'list') {
     const [of] = rest
     if (of === undefined) return unclear('Clawd: list what? /clawd list acts | made | emotes | minis.')

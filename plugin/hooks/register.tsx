@@ -44,7 +44,7 @@ import {
   wantsTall,
 } from './clawd-sim'
 import type { ActKind, Call, Emote, Playable, Routine, World } from './clawd-sim'
-import { COMMANDS, LIST_KINDS, MAX_REPEAT, isClawdDraft, marksFor, menuFor, menuLayout, namesFit, orderOf, writeOut } from './clawd-words'
+import { ALIASES, COMMANDS, EMOTE_COMMANDS, LIST_KINDS, MAX_REPEAT, isClawdDraft, marksFor, menuFor, menuLayout, namesFit, orderOf, writeOut } from './clawd-words'
 import type { ListKind, Menu, Names } from './clawd-words'
 import { UML_LEGEND, UML_WIDTH, clawdUml, umlKinds } from './clawd-uml'
 import type { UmlKind } from './clawd-uml'
@@ -62,8 +62,8 @@ const CLAWD_MAX_COLUMNS = 512 // the Raster limit
 // is the frame's top edge (user, 2026-10-05: "the way Clawd stands on top of a
 // box" with "the way the dropdown list is shown"). At most this many names show.
 const MENU_ROWS = 7
-// PICK_MODEL picks what Clawd plays next (user, 2026-10-03; Haiku until
-// 2026-10-06, then Sonnet): when a prompt is sent, when a turn ends, and
+// PICK_MODEL picks what Clawd plays next (user, 2026-10-03; Haiku, Sonnet
+// from 2026-10-06, Haiku again from 2026-10-07): when a prompt is sent, when a turn ends, and
 // otherwise after a random 10 to 60 s. It reads the messages and tool calls
 // since its last pick, its rolling summary of the session, the situation
 // (time, idle time, what Clawd is doing) and the newest act a model made. It
@@ -75,7 +75,7 @@ const MENU_ROWS = 7
 // calls, each naming a body (or all of them), an act and a delay of 0 to 5 s.
 // The picker is off until `/clawd autopick on` (user, 2026-10-07: a public
 // install makes no model calls by itself); the choice is kept in $.store.
-const PICK_MODEL = 'sonnet'
+const PICK_MODEL = 'haiku'
 const MAKE_MODEL = 'opus'
 const PICK_MIN_S = 10
 const PICK_MAX_S = 60
@@ -94,7 +94,8 @@ const EMOTE_ROUNDS = 3
 const EMOTE_DRAFTS = 3
 const EMOTE_ROUND_MS = 300_000
 const IMAGE = /\.(png|jpe?g|gif|webp)$/i
-const EMOTE_VERBS = [...Object.keys(COMMANDS), ...Object.keys(LIST_KINDS), 'ls', 'pick'] // `/clawd` words no emote may be named
+// `/clawd` words no emote may be named
+const EMOTE_VERBS = [...Object.keys(COMMANDS), ...Object.keys(EMOTE_COMMANDS), ...Object.keys(LIST_KINDS), ...Object.keys(ALIASES), 'pick']
 // What the built-in acts look like, for /clawd list and the menu while /clawd is typed.
 const ACT_WHAT: Partial<Record<ActKind, string>> = {
   ...PICKABLE,
@@ -108,6 +109,7 @@ const ACT_WHAT: Partial<Record<ActKind, string>> = {
 const isClawdOn = atom({ plugin: 'clawd', key: 'isClawdOn' } as const, true)
 const isClawdTall = atom({ plugin: 'clawd', key: 'isClawdTall' } as const, false)
 const isTracing = atom({ plugin: 'clawd', key: 'isTracing' } as const, false)
+const isDebugging = atom({ plugin: 'clawd', key: 'isDebugging' } as const, false)
 const clawdMenu = atom({ plugin: 'clawd', key: 'clawdMenu' } as const, null)
 
 // Off in headless sessions and with CLAUDE_CLAWD_OFF=1. Tests set
@@ -508,7 +510,7 @@ function lookFrom(raw: unknown, name: string, title: string): Emote | string {
   return emoteFrom({ ...r, name, title: typeof r.title === 'string' && r.title.trim() ? r.title : title })
 }
 
-/** An emote to change, and the change asked for (/clawd change). */
+/** An emote to change, and the change asked for (/clawd emote change). */
 type Change = { look: MadeEmote; text: string }
 
 /**
@@ -641,6 +643,21 @@ async function tracePick($: EngineInterface, t: Trace): Promise<void> {
   } catch (err) {
     $.ui.log(`clawd: trace not written: ${String(err)}`, { to: 'debug' })
   }
+}
+
+/**
+ * With `/clawd debug` (user, 2026-10-07), shows the pick in the transcript, in
+ * three rows the model never sees: the trigger, the model and its tokens; the
+ * whole reply; what came of it. A row shows no line breaks (it draws a glyph
+ * for each; tested live 2026-10-07), so the reply's whitespace is collapsed.
+ * `$.model.complete` returns the reply's text only, so the model's thinking
+ * cannot be shown.
+ */
+async function debugPick($: EngineInterface, t: Trace, tokens: string): Promise<void> {
+  if (!(await read($, isDebugging))) return
+  $.ui.log(`Clawd debug · autopick, ${t.trigger} · ${PICK_MODEL}${tokens}`)
+  $.ui.log(`reply: ${t.reply.replace(/\s+/g, ' ').trim() || '(none)'}`)
+  $.ui.log(`→ ${t.outcome}`)
 }
 
 async function localTime($: EngineInterface): Promise<string> {
@@ -835,7 +852,12 @@ async function pick($: EngineInterface, w: World, trigger: string, now: number):
     timeoutMs: 30_000,
   })
   const at = new Date(now).toISOString()
-  const traced = (reply: string, outcome: string) => tracePick($, { at, trigger, system: PICK_SYSTEM, prompt, reply, outcome })
+  const tokens = ` · ${answer.usage.input_tokens} tokens in, ${answer.usage.output_tokens} out`
+  const traced = async (reply: string, outcome: string) => {
+    const t = { at, trigger, system: PICK_SYSTEM, prompt, reply, outcome }
+    await debugPick($, t, tokens)
+    await tracePick($, t)
+  }
   if (!answer.isAnswered) {
     brain.last = { trigger, calls: [], why: `no answer: ${answer.reason}`, at: now }
     return traced('', `no answer: ${answer.reason}`)
@@ -894,6 +916,7 @@ async function pick($: EngineInterface, w: World, trigger: string, now: number):
   }
   if (ask.look === true) {
     // A new look: drawn in the background, so the picks go on meanwhile.
+    if (EMOTE_VERBS.includes(name)) return traced(answer.text, `${playing}; new emote ${name} refused: the name is a /clawd word`)
     if (brain.making) return traced(answer.text, `${playing}; new emote ${name} asked, but ${brain.making} is still being drawn`)
     const image = typeof ask.image === 'string' && userWrote.includes(ask.image) ? await imagePath($, ask.image) : ''
     startEmote($, name, title, why, image, 'clawd')
@@ -954,16 +977,20 @@ const ARGS: Readonly<Record<string, string>> = {
   list: ' acts|made|emotes|minis',
   autopick: ' [on|off]',
   trace: ' [off]',
-  preview: ' <emote>',
+  debug: ' [on|off]',
+}
+// What follows each `/clawd emote` command in /clawd help.
+const EMOTE_ARGS: Readonly<Record<string, string>> = {
   create: ' <name> [image] <looks>',
   change: ' <emote> [image] <change>',
   delete: ' <emote>',
+  preview: ' <emote>',
 }
 // The first line of /clawd list <kind>.
 const KIND_INTRO: Record<ListKind, string> = {
   acts: `Acts: moves Clawd or a mini plays once. /clawd act <act> [1-${MAX_REPEAT}], or /clawd <mini> <act>.`,
   made: 'Made acts: acts a model wrote when the autopicker asked for one. They play like acts.',
-  emotes: 'Emotes: looks Clawd takes for a while. /clawd emote <emote> plays one; create, change and delete make, alter and remove them.',
+  emotes: 'Emotes: looks Clawd takes for a while. /clawd emote <emote> plays one; /clawd emote create, change and delete make, alter and remove them.',
   minis: 'Minis: small Clawds, one per running subagent; each leaves when its subagent ends. /clawd <mini> <act>.',
 }
 
@@ -973,7 +1000,12 @@ async function clawdHelp($: EngineInterface): Promise<string> {
     ['/clawd', 'what Clawd is doing, and the last autopick'],
     ...Object.entries(COMMANDS).flatMap(([name, what]): [string, string][] => {
       const row: [string, string] = [`/clawd ${name}${ARGS[name] ?? ''}`, what]
-      return name === 'emote' ? [row, [`/clawd <mini> <act> [1-${MAX_REPEAT}]`, 'a mini plays an act, e.g. /clawd a1 wave']] : [row]
+      if (name !== 'emote') return [row]
+      return [
+        [`/clawd emote <emote>`, "Clawd takes an emote's look for a while"],
+        ...Object.entries(EMOTE_COMMANDS).map(([verb, does]): [string, string] => [`/clawd emote ${verb}${EMOTE_ARGS[verb] ?? ''}`, does]),
+        [`/clawd <mini> <act> [1-${MAX_REPEAT}]`, 'a mini plays an act, e.g. /clawd a1 wave'],
+      ]
     }),
   ]
   const width = Math.max(...usage.map(([cmd]) => cmd.length))
@@ -988,7 +1020,7 @@ async function clawdHelp($: EngineInterface): Promise<string> {
     '  act    a move Clawd or a mini plays once: jump, wave, chase, ... Made acts are acts a model',
     '         wrote when the autopicker asked for one; they play the same way.',
     '  emote  a look Clawd itself takes for a while, such as an octopus; it keeps moving in that look.',
-    '         Clawd only. /clawd create, change and delete make, alter and remove them.',
+    '         Clawd only. /clawd emote create, change and delete make, alter and remove them.',
     '  mini   a small Clawd that comes for each running subagent and leaves when it ends. You cannot',
     '         make one; while it is there, /clawd <its id> <act> tells it what to play (a1, a2, ...).',
     `Now there are ${n(names.acts)} acts, ${n(names.made)} made acts, ${n(names.emotes)} emotes and ${n(names.minis)} minis; /clawd list <kind> names them.`,
@@ -1234,6 +1266,17 @@ export const register: Register = on => {
           : 'Clawd: autopicks are no longer traced.',
       }
     }
+    if (verb === 'debug') {
+      const turn = arg === undefined ? undefined : ['on', 'off'].find(t => t === arg || (arg.length > 1 && t.startsWith(arg)))
+      if (arg !== undefined && !turn) return { text: 'Clawd: /clawd debug takes on, off or nothing.' }
+      const isOn = turn ? turn === 'on' : !(await read($, isDebugging))
+      await update($, isDebugging, () => isOn)
+      return {
+        text: isOn
+          ? `Clawd: debug on. Each autopick's whole reply, its tokens and what came of it now show here, dim and not sent to the model. The model's thinking is not available to a mod. /clawd debug turns it off.`
+          : 'Clawd: debug off.',
+      }
+    }
     if (verb === 'autopick') {
       if (arg === undefined) {
         $.clock.after(1, () => void pickNext($, ASKED))
@@ -1266,7 +1309,7 @@ export const register: Register = on => {
       return { text: `Clawd: ${look.name} in ${poses.length} poses, ${PREVIEW_PER_LINE} per line, is in ${path}. The poses: ${poses.join(', ')}.` }
     }
     if (verb === 'create') {
-      // `/clawd create <name> [image path] <what it looks like>`; a draw is a
+      // `/clawd emote create <name> [image path] <what it looks like>`; a draw is a
       // paid model run, so it needs an image or a description.
       const [name = '', ...rest] = order.rest
       const at = rest.findIndex(word => IMAGE.test(word))
@@ -1275,12 +1318,12 @@ export const register: Register = on => {
       const looks = oneLine(rest.filter((_, i) => i !== at).join(' '), 80)
       const title = looks || name.replace(/_/g, ' ')
       if (!/^[a-z][a-z0-9_]{1,30}$/.test(name) || (!looks && !image)) {
-        return { text: 'Usage: /clawd create <snake_case_name> [image path] <what it looks like>, e.g. /clawd create frog a green frog with big eyes' }
+        return { text: 'Usage: /clawd emote create <snake_case_name> [image path] <what it looks like>, e.g. /clawd emote create frog a green frog with big eyes' }
       }
       const taken = [...ACTS, ...Object.keys(PICKABLE), ...EMOTE_VERBS, ...(await loadMade($)).map(r => r.name), ...emotes.map(x => x.name)]
       if (taken.includes(name)) return { text: `Clawd: ${name} is taken; pick another name.` }
       if (brain.making) return { text: `Clawd: ${brain.making} is still being drawn; one at a time.` }
-      startEmote($, name, title, 'asked for with /clawd create', image, 'clawd')
+      startEmote($, name, title, 'asked for with /clawd emote create', image, 'clawd')
       return {
         text: `Clawd: a model draws ${name}${image ? ` after ${image}` : ''}, in up to ${EMOTE_ROUNDS} rounds of a minute or two; it plays when done.`,
       }
@@ -1298,7 +1341,7 @@ export const register: Register = on => {
       return { text: `Clawd: ${look.name} is deleted. Its file is now ${to}; move it back to undo.${tracked}` }
     }
     if (verb === 'change' && look) {
-      // `/clawd change <emote> [image path] <what to change>`; a paid model run like create.
+      // `/clawd emote change <emote> [image path] <what to change>`; a paid model run like create.
       const rest = order.rest.slice(1)
       const at = rest.findIndex(word => IMAGE.test(word))
       const image = at >= 0 ? await imagePath($, rest[at] ?? '') : ''
@@ -1307,9 +1350,9 @@ export const register: Register = on => {
       const words = oneLine(rest.filter((_, i) => i !== at).join(' '), 120)
       const said = /^(["']).*\1$/.test(words) && words.length > 1 ? words.slice(1, -1).trim() : words
       const text = said || (image ? 'make it look like the new reference image' : '')
-      if (!text) return { text: `Usage: /clawd change ${look.name} [image path] <what to change>, e.g. /clawd change ${look.name} make it blue` }
+      if (!text) return { text: `Usage: /clawd emote change ${look.name} [image path] <what to change>, e.g. /clawd emote change ${look.name} make it blue` }
       if (brain.making) return { text: `Clawd: ${brain.making} is still being drawn; one at a time.` }
-      startEmote($, look.name, look.title, look.why || 'asked for with /clawd change', image || look.image, 'clawd', { look, text })
+      startEmote($, look.name, look.title, look.why || 'asked for with /clawd emote change', image || look.image, 'clawd', { look, text })
       return {
         text: `Clawd: a model changes ${look.name}: "${text}", in up to ${EMOTE_ROUNDS} rounds of a minute or two; it plays when done. The old look goes to ${mod.dataDir}/emotes/old/.`,
       }
