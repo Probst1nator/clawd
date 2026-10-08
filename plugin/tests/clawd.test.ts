@@ -2,6 +2,7 @@ import type { RenderElement } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
 import {
+  bandRows,
   callActs,
   createWorld,
   emoteFrom,
@@ -387,30 +388,33 @@ test('the picker asks for a new act and plays it before it exists, Opus writes i
   const run = (args: string) =>
     $.command.run({ command: 'clawd', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
   expect((await run('trace'))?.text).toContain('/home/t/.claude/clawd/picks/sess-1.jsonl')
-  expect((await run('debug'))?.text).toMatch(/^Clawd: debug on\./)
-  await run('autopick')
+  const debugOn = (await run('debug'))?.text
+  expect(debugOn).toMatch(/^Clawd: debug on\./)
+  expect(debugOn).toContain('Autopick is off, so only /clawd autopick now picks')
+  await run('autopick now')
   await clock.advance(200)
 
   expect(asked).toEqual(['haiku', 'opus'])
   const trace = [...files.entries()].find(([p]) => p.includes('/home/t/.claude/clawd/picks/'))?.[1] ?? ''
   const traced = JSON.parse(trace.trim().split('\n').pop() ?? '{}')
-  expect(traced.trigger).toBe('asked with /clawd autopick')
+  expect(traced.trigger).toBe('asked with /clawd autopick now')
   expect(traced.system).toMatch(/^You direct Clawd/)
   expect(traced.prompt).toContain('<new_since_your_last_pick>')
   expect(traced.outcome).toBe('played nothing; new act victory_lap made')
   const debug = logs.findIndex(l => l.startsWith('Clawd debug'))
   expect(logs.slice(debug)).toEqual([
-    'Clawd debug · autopick, asked with /clawd autopick · haiku · 1 tokens in, 1 out',
+    'Clawd debug · autopick, asked with /clawd autopick now · haiku · 1 tokens in, 1 out',
     `reply: ${traced.reply}`,
     '→ played nothing; new act victory_lap made',
   ])
   expect((await run('debug'))?.text).toBe('Clawd: debug off.')
+  expect((await run('trace'))?.text).toBe('Clawd: autopicks are no longer traced.')
   const path = [...files.keys()].find(p => p === '/home/t/.claude/clawd/acts/victory_lap.json')
   const saved = JSON.parse(files.get(path ?? '') ?? '{}')
   expect(saved.title).toBe('Victory lap after green tests')
   expect(saved.steps.length).toBe(3)
   expect(rows(blits[blits.length - 1] ?? '', 100)[0]).toMatch(/clawd: victory_lap \(new\) "Victory lap after green tests"$/)
-  expect((await run(''))?.text).toContain('Last autopick (asked with /clawd autopick')
+  expect((await run(''))?.text).toContain('Last autopick (asked with /clawd autopick now')
 })
 
 test('a mini Clawd comes for a subagent, takes parallel calls with a delay, and leaves when it is done', async () => {
@@ -732,7 +736,7 @@ test('with a base look Clawd wears it from the start without a puff, another emo
   expect(low.wearing?.name).toBe('octo')
 })
 
-test('the autopicker calls no model until /clawd autopick on, picks on its timer once on, and stops when off', { timeoutMs: 20_000 }, async ($, on) => {
+test('the autopicker calls no model until /clawd autopick switches it on, picks on its timer once on, and stops when switched off', { timeoutMs: 20_000 }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_700_000_000_000 })
   mock.store(on)
   mock.env(on, { HOME: '/home/t', CLAUDE_CLAWD_SEED: '7' })
@@ -764,7 +768,7 @@ test('the autopicker calls no model until /clawd autopick on, picks on its timer
   await clock.advance(61_000)
   expect(triggers).toEqual([])
   expect((await run(''))?.text).toContain('The autopicker is off, so Clawd plays random acts')
-  expect((await run('autopick o'))?.text).toBe('Clawd: /clawd autopick takes on, off or nothing.')
+  expect((await run('autopick o'))?.text).toBe('Clawd: /clawd autopick takes now, on, off or nothing.')
 
   await $.ui.mount({
     plugin: 'clawd',
@@ -773,15 +777,16 @@ test('the autopicker calls no model until /clawd autopick on, picks on its timer
     props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 40, scroll: { offset: 0, bodyRows: 20 }, view: {} },
     viewport: { columns: 100, rows: 40 },
   })
-  expect((await run('autopick on'))?.text).toContain('the autopicker is on (remembered)')
+  expect((await run('autopick'))?.text).toContain('the autopicker is on (remembered)')
   await clock.advance(61_000)
   expect(triggers.length).toBeGreaterThan(0)
+  expect((await run('autopick'))?.text).toContain('the autopicker is off (remembered)')
   expect((await run('autopick of'))?.text).toContain('the autopicker is off (remembered)')
   const picked = triggers.length
   await clock.advance(61_000)
   expect(triggers.length).toBe(picked)
   // Asked for, it picks once while off.
-  await run('autopick')
+  await run('autopick now')
   await clock.advance(200)
   expect(triggers.length).toBe(picked + 1)
 })
@@ -1284,4 +1289,202 @@ test('/clawd help uml draws in colour, each run by what it is, and other /clawd 
   })
   expect(await status.find({ text: 'engine row' })).toBeDefined()
   expect(await status.find({ key: 'uml-0' })).toBeUndefined()
+})
+
+test('while Remote Control is on, Clawd wears a gray antenna on the back edge of its head, leaning back with a green tip, on its own look and on an emote', async () => {
+  const idle = { kind: 'idle' as const, t0: 0, stage: 0, dur: 99, next: 99, look: 0 }
+  // The tip needs the band's second row of headroom, so the band stays 5 rows high.
+  const w = createWorld(20, 4, seeded(1))
+  w.queue = []
+  w.x = 9
+  w.act = { ...idle }
+  w.blinkAt = 999
+  step(w)
+  expect(bandRows(w)).toBe(4)
+  expect(rows(frameCells(w), 20)[0]).toBe('')
+  w.antenna = true
+  step(w)
+  expect(bandRows(w)).toBe(5)
+  // A terminal with room for 4 rows only shows the stalk.
+  expect(rows(frameCells(w), 20)).toEqual([' ▚', ' ▐▛███▜▌', '▝▜█████▛▘', `──▘▘─▝▝${'─'.repeat(13)}`])
+  expect(cellsWith(frameCells(w), 20, 0x5fd47a)).toEqual([])
+
+  resize(w, 20, 5)
+  expect(rows(frameCells(w), 20)).toEqual(['▗', ' ▚', ' ▐▛███▜▌', '▝▜█████▛▘', `──▘▘─▝▝${'─'.repeat(13)}`])
+  expect(cellsWith(frameCells(w), 20, 0xa8a8a8)).toEqual(['1,1'])
+  expect(cellsWith(frameCells(w), 20, 0x5fd47a)).toEqual(['0,0'])
+  // It stands on the back edge and leans away from where Clawd faces.
+  w.facing = -1
+  expect(rows(frameCells(w), 20).slice(0, 2)).toEqual(['        ▖', '       ▞'])
+  // Sitting, the head's top row is the lower half of a cell: the stalk is a pixel longer and the tip keeps its cell.
+  w.facing = 1
+  w.sitting = true
+  expect(cellsWith(frameCells(w), 20, 0x5fd47a)).toEqual(['0,0'])
+  expect(cellsWith(frameCells(w), 20, 0xa8a8a8)).toEqual(['0,1', '1,1'])
+  w.sitting = false
+  // The tip blinks: dim for 0.2 s every 1.6 s.
+  w.t = 1.5
+  expect(cellsWith(frameCells(w), 20, 0x5fd47a)).toEqual([])
+  expect(cellsWith(frameCells(w), 20, 0x2f6b3d)).toEqual(['0,0'])
+
+  const wearing = (look: object) => {
+    const v = createWorld(30, 4, seeded(6))
+    v.queue = []
+    v.x = 20
+    v.act = { ...idle }
+    v.blinkAt = 999
+    v.antenna = true
+    v.wearing = emoteFrom(look) as Emote
+    v.wornUntil = 99
+    step(v)
+    return v
+  }
+  // On a round head as tall as the MatSci octopus, the band grows to 6 rows and
+  // the antenna stands on the head's top back edge, not on a tentacle.
+  const HEAD = {
+    name: 'head',
+    title: 'a round head with tentacles',
+    color: '#649feb',
+    shapes: { normal: ['......######......', '....##########....', '...############...', '...###oo##oo###...', '...###oo##oo###...', '....##########....', '.###.###..###.###.'] },
+    legs: [1, 6, 11, 16],
+    legLength: 1,
+    wiggle: true,
+    armRow: 6,
+    arms: { out: [[1, 0]] },
+    tall: true,
+    dur: 99,
+  }
+  const v = wearing(HEAD)
+  expect(bandRows(v)).toBe(6)
+  v.antenna = false
+  expect(bandRows(v)).toBe(5)
+  v.antenna = true
+  resize(v, 30, 6)
+  expect(rows(frameCells(v), 30).slice(0, 2)).toEqual(['      ▗', '       ▚▗▄▄▖'])
+  expect(cellsWith(frameCells(v), 30, 0xa8a8a8)).toEqual(['7,1'])
+  expect(cellsWith(frameCells(v), 30, 0x5fd47a)).toEqual(['6,0'])
+  // On a look with a mark beside the head, it stands on the part with the eyes.
+  const HUH = {
+    name: 'huh',
+    title: 'huh?',
+    color: '#e8a33d',
+    shapes: { normal: ['..............##.', '.............#..#', '................#', '############...#.', '##o######o##.....', '############...#.', '############.....'] },
+    legs: [1, 3, 8, 10],
+    legLength: 1,
+    armRow: 4,
+    tall: true,
+    dur: 99,
+  }
+  const u = wearing(HUH)
+  resize(u, 30, bandRows(u))
+  expect(rows(frameCells(u), 30).slice(1, 3)).toEqual(['     ▖       ▄', '     ▝▖     ▝ ▌'])
+  expect(cellsWith(frameCells(u), 30, 0x5fd47a)).toEqual(['5,1'])
+  // A mini wears none.
+  spawnMini(v, 'agent-1', 'a task', 'general-purpose')
+  v.antenna = false
+  expect(cellsWith(frameCells(v), 30, 0xa8a8a8)).toEqual([])
+})
+
+test('the mod reads Remote Control from the environment every second and puts the antenna on and takes it off', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_700_000_000_000 })
+  mock.store(on)
+  const env: Record<string, string | undefined> = { HOME: '/home/t', CLAUDE_CLAWD_SEED: '7' }
+  on('env.get', async ($, e) => ({ value: env[e.name] }))
+  const blits: string[] = []
+  on('ui.log', async () => ({ value: undefined }))
+  on('command.register', async ($, e) => ({ value: { command: e.name } }))
+  on('ui.blit', async ($, e) => {
+    if ('cells' in e) blits.push(e.cells)
+    return { value: {} }
+  })
+  on('session.start', async ($, e) => ({ cwd: e.cwd }))
+  on('ui.render', async ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return h(Text, { dimColor: true }, 'engine band') as RenderElement
+  })
+  const tips = (from: number) => blits.slice(from).filter(c => cellsWith(c, 100, 0xa8a8a8).length > 0)
+  const props = { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 100, scroll: { offset: 0, bodyRows: 20 }, view: {} }
+  const mountRows = async () => {
+    const m = await $.ui.mount({ plugin: 'clawd', surface: 'terminal', component: 'AbovePrompt', props, viewport: { columns: 100, rows: 40 } })
+    return (await m.find({ type: 'Raster', key: 'clawd' }))?.props.rows
+  }
+  const run = (args: string) =>
+    $.command.run({ command: 'clawd', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+
+  await $.session.start({ cwd: '/home/t/proj', surface: 'terminal', isInteractive: true })
+  await $.ui.mount({
+    plugin: 'clawd',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 100, scroll: { offset: 0, bodyRows: 20 }, view: {} },
+    viewport: { columns: 100, rows: 40 },
+  })
+  await clock.advance(2000) // Clawd walks in from the left
+  expect(tips(0)).toEqual([])
+  expect((await run(''))?.text).not.toContain('Remote Control')
+
+  env.CLAUDE_CODE_BRIDGE_SESSION_ID = 'session_01abc'
+  await clock.advance(2000)
+  expect(tips(0).length).toBeGreaterThan(5)
+  expect(await mountRows()).toBe(5)
+  expect((await run(''))?.text).toContain('Remote Control is on, so it wears an antenna.')
+
+  delete env.CLAUDE_CODE_BRIDGE_SESSION_ID
+  await clock.advance(1100)
+  const off = blits.length
+  await clock.advance(1000)
+  expect(blits.length).toBeGreaterThan(off)
+  expect(tips(off)).toEqual([])
+  expect(await mountRows()).toBe(4)
+})
+
+test('while Remote Control is on, the autopicker pauses and its setting stays on; it picks again when Remote Control ends', { timeoutMs: 20_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_700_000_000_000 })
+  mock.store(on, { isAutopickOn: true })
+  const env: Record<string, string | undefined> = { HOME: '/home/t', CLAUDE_CLAWD_SEED: '7', CLAUDE_CODE_BRIDGE_SESSION_ID: 'session_01abc' }
+  on('env.get', async ($, e) => ({ value: env[e.name] }))
+  const triggers: string[] = []
+  const usage = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+  on('ui.log', async () => ({ value: undefined }))
+  on('command.register', async ($, e) => ({ value: { command: e.name } }))
+  on('ui.blit', async () => ({ value: {} }))
+  on('process.run', async () => ({
+    value: { exitCode: 0, stdout: 'Sat 17:00\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+  }))
+  on('model.complete', async ($, e) => {
+    triggers.push(/trigger: ([^\n]*)/.exec(e.prompt)?.[1] ?? e.prompt.slice(0, 40))
+    const text = '{"summary": "", "calls": [{"who": "clawd", "play": "wave"}], "why": "", "new": null}'
+    return { value: { isAnswered: true as const, text, usage } }
+  })
+  on('session.start', async ($, e) => ({ cwd: e.cwd }))
+  on('ui.render', async ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return h(Text, { dimColor: true }, 'engine band') as RenderElement
+  })
+  const run = (args: string) =>
+    $.command.run({ command: 'clawd', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+
+  await $.session.start({ cwd: '/home/t/proj', surface: 'terminal', isInteractive: true })
+  await $.ui.mount({
+    plugin: 'clawd',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 40, scroll: { offset: 0, bodyRows: 20 }, view: {} },
+    viewport: { columns: 100, rows: 40 },
+  })
+  await clock.advance(61_000)
+  expect(triggers).toEqual([])
+  expect((await run(''))?.text).toContain('The autopicker is paused while Remote Control is on')
+  expect((await run('autopick on'))?.text).toContain('It is paused while Remote Control is on')
+  await clock.advance(61_000)
+  expect(triggers).toEqual([])
+  // Asked for, it picks once while paused.
+  await run('autopick now')
+  await clock.advance(200)
+  expect(triggers).toEqual(['asked with /clawd autopick now'])
+
+  delete env.CLAUDE_CODE_BRIDGE_SESSION_ID
+  await clock.advance(61_000)
+  expect(triggers.length).toBeGreaterThan(1)
+  expect((await run(''))?.text).not.toContain('paused')
 })

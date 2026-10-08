@@ -43,8 +43,9 @@ so older versions may not load it.
 | `/clawd emote <emote>` | Clawd takes an emote's look for a while |
 | `/clawd emote create`, `change`, `delete`, `preview` | make, redraw, remove or picture an emote |
 | `/clawd on`, `/clawd off` | show or hide Clawd |
-| `/clawd autopick on`, `off` | let a model choose what Clawd plays (see below) |
-| `/clawd debug` | show each autopick's whole reply in the transcript; again to stop |
+| `/clawd autopick` | switch a model choosing what Clawd plays on or off (see below); `now` chooses once |
+| `/clawd debug` | switch showing each autopick's whole reply in the transcript on or off |
+| `/clawd trace` | switch writing each autopick to a file on or off |
 
 While you type `/clawd `, a list above the prompt shows what fits, and a space writes out
 a word that fits one name.
@@ -53,12 +54,15 @@ a word that fits one name.
 
 By default the mod makes no model calls. Clawd picks random acts by itself.
 
-`/clawd autopick on` hands that choice to a model (Haiku). It reads what happens in the
+`/clawd autopick` hands that choice to a model (Haiku). It reads what happens in the
 session and picks what Clawd and the small Clawds play: after each prompt and turn, and
 every 10 to 60 seconds. In a busy session that is about 100 calls an hour of about 1,500
 tokens each, and it may have Opus write up to 5 new acts or looks a day. All of it runs
-through your own Claude Code login and counts against your usage. `/clawd autopick off`
-stops it. The setting is remembered.
+through your own Claude Code login and counts against your usage. `/clawd autopick`
+again stops it. The setting is remembered.
+
+While Remote Control is on, Clawd wears an antenna and the autopicker pauses, so Clawd
+plays random acts. When Remote Control ends, the autopicker goes on as it was set.
 
 `/clawd emote create <name> <what it looks like>` has Opus draw a new emote, a look Clawd
 takes for a while, and `/clawd emote change <emote> <what to change>` redraws one. Each

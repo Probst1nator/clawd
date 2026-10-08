@@ -18,9 +18,9 @@ export const COMMANDS: Readonly<Record<string, string>> = {
   list: 'the names of one kind: acts, made, emotes or minis',
   on: 'show Clawd (remembered)',
   off: 'hide Clawd (remembered)',
-  autopick: 'a model chooses what plays next, now; autopick on keeps it choosing',
-  trace: 'write each autopick to a file; trace off stops',
-  debug: "show each autopick's whole reply here; debug again stops",
+  autopick: 'switch a model choosing what plays next on or off; autopick now chooses once',
+  trace: 'switch writing each autopick to a file on or off',
+  debug: "switch showing each autopick's whole reply here on or off",
 }
 /**
  * What `/clawd emote` takes besides an emote's name (user, 2026-10-07: all
@@ -69,12 +69,16 @@ const FIRST: Kind[] = ['command', 'mini', 'emote', 'made', 'act']
 const PLAYS: Kind[] = ['act', 'made']
 const LIST_ROWS: Fit[] = Object.entries(LIST_KINDS).map(([name, what]) => ({ kind: 'command', name, what }))
 const EMOTE_ROWS: Fit[] = Object.entries(EMOTE_COMMANDS).map(([name, what]) => ({ kind: 'command', name, what }))
-const TRACE_ROWS: Fit[] = [{ kind: 'command', name: 'off', what: 'stop writing the autopicks' }]
+const TRACE_ROWS: Fit[] = [
+  { kind: 'command', name: 'on', what: 'write each autopick to a file' },
+  { kind: 'command', name: 'off', what: 'stop writing the autopicks' },
+]
 const DEBUG_ROWS: Fit[] = [
   { kind: 'command', name: 'on', what: "each autopick's reply, tokens and outcome in the transcript, not sent to the model" },
   { kind: 'command', name: 'off', what: 'stop showing them' },
 ]
 const AUTOPICK_ROWS: Fit[] = [
+  { kind: 'command', name: 'now', what: 'a model chooses what plays next, once (uses your Claude usage)' },
   { kind: 'command', name: 'on', what: 'a model chooses every 10 to 60 s (remembered; uses your Claude usage)' },
   { kind: 'command', name: 'off', what: 'random acts only, no model calls (remembered)' },
 ]

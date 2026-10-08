@@ -16,8 +16,8 @@ import {
   READ_HOLD_S,
   SHEET_POSES,
   SLEEP_AFTER_S,
-  TALL_ROWS,
   TICK_MS,
+  bandRows,
   bodyOf,
   callActs,
   callLabel,
@@ -41,7 +41,6 @@ import {
   setEdge,
   spawnMini,
   step,
-  wantsTall,
 } from './clawd-sim'
 import type { ActKind, Call, Emote, Playable, Routine, World } from './clawd-sim'
 import { ALIASES, COMMANDS, EMOTE_COMMANDS, LIST_KINDS, MAX_REPEAT, isClawdDraft, marksFor, menuFor, menuLayout, namesFit, orderOf, writeOut } from './clawd-words'
@@ -54,7 +53,8 @@ import type { UmlKind } from './clawd-uml'
 // behaviours are in clawd-sim.ts). User decisions 2026-10-03: logo-style
 // quadrant blocks, Clawd standing on a floor line at the band's bottom, two
 // sub-pixels of headroom above him (BAND_ROWS), and a row more (TALL_ROWS)
-// during big jumps. With only 3 rows to spare he bounces in place.
+// during big jumps; two more (ANTENNA_ROWS) while he wears the Remote Control
+// antenna on a tall look. With only 3 rows to spare he bounces in place.
 const CLAWD_MIN_ROWS = 3
 const CLAWD_MIN_COLUMNS = 20
 const CLAWD_MAX_COLUMNS = 512 // the Raster limit
@@ -107,7 +107,7 @@ const ACT_WHAT: Partial<Record<ActKind, string>> = {
 }
 
 const isClawdOn = atom({ plugin: 'clawd', key: 'isClawdOn' } as const, true)
-const isClawdTall = atom({ plugin: 'clawd', key: 'isClawdTall' } as const, false)
+const clawdRows = atom({ plugin: 'clawd', key: 'clawdRows' } as const, BAND_ROWS)
 const isTracing = atom({ plugin: 'clawd', key: 'isTracing' } as const, false)
 const isDebugging = atom({ plugin: 'clawd', key: 'isDebugging' } as const, false)
 const clawdMenu = atom({ plugin: 'clawd', key: 'clawdMenu' } as const, null)
@@ -132,6 +132,7 @@ const mod = {
   project: '',
   startedAt: 0,
   names: undefined as Names | undefined,
+  isRemote: false, // Remote Control is on: Clawd wears an antenna and the autopicker pauses
 }
 
 /** An act a model made, as kept in data/acts/<name>.json. */
@@ -169,7 +170,7 @@ const clawd = {
   world: null as World | null,
   requestId: null as string | null,
   last: '',
-  isTall: null as boolean | null, // null: not yet written this load
+  rows: null as number | null, // the band's height as last written; null: not yet written this load
 }
 
 function clawdTick($: EngineInterface): void {
@@ -177,10 +178,10 @@ function clawdTick($: EngineInterface): void {
   const requestId = clawd.requestId
   if (!w || !requestId) return // paused while the band is not mounted
   step(w)
-  const tall = wantsTall(w)
-  if (tall !== clawd.isTall) {
-    clawd.isTall = tall
-    void update($, isClawdTall, () => tall) // the band redraws at its new height
+  const rows = bandRows(w)
+  if (rows !== clawd.rows) {
+    clawd.rows = rows
+    void update($, clawdRows, () => rows) // the band redraws at its new height
   }
   const cells = frameCells(w)
   if (cells === clawd.last) return
@@ -195,6 +196,28 @@ function clawdTick($: EngineInterface): void {
     clawd.requestId = null
     $.ui.invalidate('ui.render')
   })
+}
+
+// While Remote Control is on, Clawd wears an antenna (user, 2026-10-08). No
+// hook event says when it goes on or off, but the engine keeps
+// CLAUDE_CODE_BRIDGE_SESSION_ID in its own environment while the session has a
+// Remote Control link (2.1.294), so the mod reads it every REMOTE_POLL_MS.
+// While it is on, the autopicker pauses and Clawd plays random acts; the stored
+// setting is left as it is and applies again when Remote Control ends (user,
+// 2026-10-08).
+const REMOTE_POLL_MS = 1000
+
+async function pollRemote($: EngineInterface): Promise<void> {
+  const isRemote = Boolean(await $.env.get('CLAUDE_CODE_BRIDGE_SESSION_ID'))
+  if (isRemote === mod.isRemote) return
+  mod.isRemote = isRemote
+  if (clawd.world) clawd.world.antenna = isRemote
+  if (isRemote) {
+    brain.timer?.cancel()
+    brain.timer = null
+    brain.dueAt = 0
+  } else if (await isAutopicking($)) schedulePick($, await $.clock.now())
+  $.ui.log(`clawd: Remote Control ${isRemote ? 'on, antenna up, autopicker paused' : 'off, antenna down'}`, { to: 'debug' })
 }
 
 // --- the picker ----------------------------------------------------------------
@@ -347,6 +370,11 @@ async function lookOf($: EngineInterface, root: string): Promise<string> {
 /** Whether the autopicker runs by itself (`/clawd autopick on`); off until then. */
 async function isAutopicking($: EngineInterface): Promise<boolean> {
   return (await $.store.get('isAutopickOn')) === true
+}
+
+/** Whether the autopicker picks by itself now: switched on, and Remote Control off. */
+async function isPickingAlone($: EngineInterface): Promise<boolean> {
+  return !mod.isRemote && (await isAutopicking($))
 }
 
 /** A local image's real path for an emote's reference, or '' when it is none. */
@@ -796,7 +824,7 @@ async function makeAct($: EngineInterface, name: string, title: string, why: str
   return act
 }
 
-const ASKED = 'asked with /clawd autopick'
+const ASKED = 'asked with /clawd autopick now'
 
 function schedulePick($: EngineInterface, now: number): void {
   brain.timer?.cancel()
@@ -816,8 +844,8 @@ async function pickNext($: EngineInterface, trigger: string): Promise<void> {
   }
   const w = clawd.world
   const now = await $.clock.now()
-  // Off, only /clawd autopick picks, and no timer runs.
-  if (trigger !== ASKED && !(await isAutopicking($))) return
+  // Off, or paused while Remote Control is on, only /clawd autopick now picks, and no timer runs.
+  if (trigger !== ASKED && !(await isPickingAlone($))) return
   if (!w || !clawd.requestId || !(await read($, isClawdOn))) return schedulePick($, now)
   // Asleep with no subagent running, Clawd waits for the next session event,
   // which wakes it and picks.
@@ -832,7 +860,7 @@ async function pickNext($: EngineInterface, trigger: string): Promise<void> {
     const again = brain.again
     brain.again = null
     if (again) void pickNext($, again)
-    else if (await isAutopicking($)) schedulePick($, await $.clock.now())
+    else if (await isPickingAlone($)) schedulePick($, await $.clock.now())
   }
 }
 
@@ -975,8 +1003,8 @@ const ARGS: Readonly<Record<string, string>> = {
   act: ` <act> [1-${MAX_REPEAT}]`,
   emote: ' <emote>',
   list: ' acts|made|emotes|minis',
-  autopick: ' [on|off]',
-  trace: ' [off]',
+  autopick: ' [now|on|off]',
+  trace: ' [on|off]',
   debug: ' [on|off]',
 }
 // What follows each `/clawd emote` command in /clawd help.
@@ -1023,6 +1051,7 @@ async function clawdHelp($: EngineInterface): Promise<string> {
     '         Clawd only. /clawd emote create, change and delete make, alter and remove them.',
     '  mini   a small Clawd that comes for each running subagent and leaves when it ends. You cannot',
     '         make one; while it is there, /clawd <its id> <act> tells it what to play (a1, a2, ...).',
+    'While Remote Control is on, Clawd wears a gray antenna with a green tip, on any look, and the autopicker pauses.',
     `Now there are ${n(names.acts)} acts, ${n(names.made)} made acts, ${n(names.emotes)} emotes and ${n(names.minis)} minis; /clawd list <kind> names them.`,
     '',
     ...usage.map(([cmd, what]) => `${cmd.padEnd(width)}  ${what}`),
@@ -1091,16 +1120,18 @@ async function clawdStatus($: EngineInterface): Promise<string> {
     ? 'The autopicker is choosing now.'
     : !(await isAutopicking($))
       ? 'The autopicker is off, so Clawd plays random acts; /clawd autopick on lets a model choose (uses your Claude usage).'
-      : brain.dueAt > 0
-        ? `Next autopick in ${ago(brain.dueAt - now)}.`
-        : 'Next autopick at the next prompt or turn end.'
+      : mod.isRemote
+        ? 'The autopicker is paused while Remote Control is on, so Clawd plays random acts; it picks again when Remote Control ends.'
+        : brain.dueAt > 0
+          ? `Next autopick in ${ago(brain.dueAt - now)}.`
+          : 'Next autopick at the next prompt or turn end.'
   const minis = (w?.minis ?? []).map(
     m =>
       `${m.id} "${oneLine(m.title, 40)}" (${m.kind}, ${ago((w ? w.t - m.since : 0) * 1000)}, ${m.tools} tools, ` +
       `${m.isLeaving ? 'leaving' : (m.act?.routine ?? m.act?.kind ?? 'between acts')})`,
   )
   return [
-    `Clawd ${(await read($, isClawdOn)) ? 'on' : 'off'}: ${where}.`,
+    `Clawd ${(await read($, isClawdOn)) ? 'on' : 'off'}: ${where}.${mod.isRemote ? ' Remote Control is on, so it wears an antenna.' : ''}`,
     `Minis: ${minis.join('; ') || 'none (one comes per running subagent)'}; ${w?.minisMade ?? 0} this session.`,
     last
       ? `Last autopick (${last.trigger}, ${ago(now - last.at)} ago): ${last.calls.map(callText).join(', ') || '-'}` +
@@ -1133,6 +1164,8 @@ export const register: Register = on => {
       description: 'Clawd above the prompt: help, act, emote, list, on, off, autopick; short names work',
     })
     $.clock.every(TICK_MS, () => clawdTick($))
+    await pollRemote($)
+    $.clock.every(REMOTE_POLL_MS, () => void pollRemote($))
     const root = $.plugin.root
     mod.emoteDir = `${root}/emotes`
     mod.dataDir = await dataDirOf($, root)
@@ -1140,7 +1173,7 @@ export const register: Register = on => {
     if (mod.look) await loadEmotes($) // finds the base look before Clawd is drawn
     mod.project = e.cwd.split('/').filter(Boolean).pop() ?? e.cwd
     mod.startedAt = await $.clock.now()
-    if (await isAutopicking($)) schedulePick($, mod.startedAt)
+    if (await isPickingAlone($)) schedulePick($, mod.startedAt)
     return started
   })
 
@@ -1257,12 +1290,16 @@ export const register: Register = on => {
       await $.store.set('isClawdOn', verb === 'on')
       return { text: `Clawd ${verb}.` }
     }
+    // Bare trace, debug and autopick switch their state (user, 2026-10-07:
+    // "it should just switch the current state"); on and off still set it.
     if (verb === 'trace') {
-      const isOn = arg === undefined || !'off'.startsWith(arg)
+      const turn = arg === undefined ? undefined : ['on', 'off'].find(t => t === arg || (arg.length > 1 && t.startsWith(arg)))
+      if (arg !== undefined && !turn) return { text: 'Clawd: /clawd trace takes on, off or nothing.' }
+      const isOn = turn ? turn === 'on' : !(await read($, isTracing))
       await update($, isTracing, () => isOn)
       return {
         text: isOn
-          ? `Clawd: each autopick now goes to ${mod.dataDir}/picks/${await $.session.id()}.jsonl (the last ${TRACE_MAX}).`
+          ? `Clawd: each autopick now goes to ${mod.dataDir}/picks/${await $.session.id()}.jsonl (the last ${TRACE_MAX}). /clawd trace stops it.`
           : 'Clawd: autopicks are no longer traced.',
       }
     }
@@ -1271,33 +1308,41 @@ export const register: Register = on => {
       if (arg !== undefined && !turn) return { text: 'Clawd: /clawd debug takes on, off or nothing.' }
       const isOn = turn ? turn === 'on' : !(await read($, isDebugging))
       await update($, isDebugging, () => isOn)
+      // User, 2026-10-07: debug looked broken while autopick was off and no pick ran.
+      const offHint = !(await isAutopicking($))
+        ? ' Autopick is off, so only /clawd autopick now picks; /clawd autopick lets it run by itself.'
+        : mod.isRemote
+          ? ' Autopick is paused while Remote Control is on, so only /clawd autopick now picks.'
+          : ''
       return {
         text: isOn
-          ? `Clawd: debug on. Each autopick's whole reply, its tokens and what came of it now show here, dim and not sent to the model. The model's thinking is not available to a mod. /clawd debug turns it off.`
+          ? `Clawd: debug on. Each autopick's whole reply, its tokens and what came of it now show here, dim and not sent to the model. The model's thinking is not available to a mod.${offHint} /clawd debug turns it off.`
           : 'Clawd: debug off.',
       }
     }
     if (verb === 'autopick') {
-      if (arg === undefined) {
+      const turn = arg === undefined ? undefined : ['now', 'on', 'off'].find(t => t === arg || (arg.length > 1 && t.startsWith(arg)))
+      if (arg !== undefined && !turn) return { text: 'Clawd: /clawd autopick takes now, on, off or nothing.' }
+      if (turn === 'now') {
         $.clock.after(1, () => void pickNext($, ASKED))
         return { text: 'Clawd: the autopicker chooses now; /clawd shows its pick.' }
       }
-      const turn = ['on', 'off'].find(t => t === arg || (arg.length > 1 && t.startsWith(arg)))
-      if (!turn) return { text: 'Clawd: /clawd autopick takes on, off or nothing.' }
-      await $.store.set('isAutopickOn', turn === 'on')
-      if (turn === 'on') {
-        schedulePick($, await $.clock.now())
+      const isOn = turn ? turn === 'on' : !(await isAutopicking($))
+      await $.store.set('isAutopickOn', isOn)
+      if (isOn) {
+        if (!mod.isRemote) schedulePick($, await $.clock.now())
         return {
           text:
             `Clawd: the autopicker is on (remembered). ${PICK_MODEL} picks what plays after each prompt and turn and every ` +
             `${PICK_MIN_S} to ${PICK_MAX_S} s, about 100 calls an hour in a busy session, and may have ${MAKE_MODEL} make ` +
-            `up to ${NEW_PER_DAY} new acts or emotes a day. It all counts against your Claude usage.`,
+            `up to ${NEW_PER_DAY} new acts or emotes a day. It all counts against your Claude usage. /clawd autopick turns it off.` +
+            (mod.isRemote ? ' It is paused while Remote Control is on and starts when Remote Control ends.' : ''),
         }
       }
       brain.timer?.cancel()
       brain.timer = null
       brain.dueAt = 0
-      return { text: 'Clawd: the autopicker is off (remembered). Clawd plays random acts and makes no model calls.' }
+      return { text: 'Clawd: the autopicker is off (remembered). Clawd plays random acts and makes no model calls. /clawd autopick turns it on.' }
     }
     const emotes = await loadEmotes($)
     if (verb === 'preview') {
@@ -1379,7 +1424,7 @@ export const register: Register = on => {
   // then the /clawd menu while one is typed.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (mod.isOff || e.surface !== 'terminal' || e.props.hasSurvey) return next(e)
-    const rows = Math.min((await read($, isClawdTall)) ? TALL_ROWS : BAND_ROWS, e.props.maxRows)
+    const rows = Math.min(await read($, clawdRows), e.props.maxRows)
     const columns = Math.min(CLAWD_MAX_COLUMNS, e.props.bodyColumns)
     const isShown = (await read($, isClawdOn)) && rows >= CLAWD_MIN_ROWS && columns >= CLAWD_MIN_COLUMNS
     // With Clawd hidden the menu draws its own top edge.
@@ -1393,6 +1438,7 @@ export const register: Register = on => {
     if (isShown) {
       clawd.world ??= createWorld(columns, rows, mod.rand)
       clawd.world.base = mod.base
+      clawd.world.antenna = mod.isRemote
       if (clawd.world.cols !== columns || clawd.world.rows !== rows) resize(clawd.world, columns, rows)
       setEdge(clawd.world, menu ? menu.title : null, menu?.note)
       clawd.requestId = e.requestId

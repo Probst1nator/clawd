@@ -26,6 +26,8 @@ const LAYERS = [4, 3, 2, 1] // bricks per pile layer, bottom up, as far as the b
 /** The band's height in rows, and its height while a body does a big jump. */
 export const BAND_ROWS = 4
 export const TALL_ROWS = 5
+/** The band's height while Clawd wears a tall look and the Remote Control antenna. */
+export const ANTENNA_ROWS = 6
 const TALL_HOLD_S = 0.6 // the band stays tall this long after a big jump, so a second one does not resize it
 export const READ_HOLD_S = 1.2 // the scroll stays up this long after the last reading call
 
@@ -42,6 +44,9 @@ const WHITE = 0xf0f0f0
 const PAPER = 0xe8dcb8 // the scroll a reading body holds
 const ROLL = 0x8b5e34 // its rolled ends
 const SWEAT = 0x7fd4ff
+const ANTENNA = 0xa8a8a8 // the antenna Clawd wears while Remote Control is on
+const SIGNAL = 0x5fd47a // its tip
+const SIGNAL_DIM = 0x2f6b3d // its tip as it blinks
 const FLOOR = 0x7a7a7a // the floor line, grey like the prompt border
 export const FLOOR_TEXT = '#7a7a7a' // FLOOR as a Text color, for the menu's frame below the band
 const LABEL = 0x9a9aa8 // the line at the top right: what was picked
@@ -313,6 +318,7 @@ export type World = Body & {
   due: { at: number; who: string; acts: Act[] }[] // model calls waiting for their time
   base: Emote | null // the look Clawd wears whenever it wears no other; null: Clawd's own
   baseWorn: Emote | null // the base as Clawd wears it now; null while it wears another look or none
+  antenna: boolean // Remote Control is on: Clawd wears an antenna on whatever look it has
 }
 
 // --- setup -------------------------------------------------------------------
@@ -370,6 +376,7 @@ export function createWorld(cols: number, rows: number, rand: () => number = Mat
     due: [],
     base: null,
     baseWorn: null,
+    antenna: false,
   }
   resize(w, cols, rows)
   // Clawd walks in from the left and says hello.
@@ -576,6 +583,12 @@ function leave(w: World, mini: Mini, reason: string): void {
 /** True while a body wants the tall band: during a big jump and shortly after. */
 export function wantsTall(w: World): boolean {
   return w.t < w.tallUntil
+}
+
+/** The band's height in rows that the world wants now: a row more while tall, two with the antenna on a tall look. */
+export function bandRows(w: World): number {
+  if (!wantsTall(w)) return BAND_ROWS
+  return w.antenna && w.wearing?.isTall ? ANTENNA_ROWS : TALL_ROWS
 }
 
 /** `/clawd [who] <act> [n]`: do it now, `n` times in a row; false when `who` is not there. */
@@ -990,6 +1003,7 @@ export function step(w: World): void {
     if (c === w) wearBase(w)
     if (c.wearing?.isTall) w.tallUntil = w.t + TALL_HOLD_S
   }
+  if (w.antenna) w.tallUntil = w.t + TALL_HOLD_S // the antenna's tip needs the second row of headroom
   moveParticles(w)
   moveSpark(w)
   for (const c of bodies(w)) {
@@ -1832,6 +1846,14 @@ function drawWorn(w: World, c: Body, look: Emote, put: Put): void {
     drawScroll(c, left, sw, (last >= 0 ? last : sw - 1) + reach, [ar - 2, ar - 1, ar, ar + 1], at)
   }
 
+  if (w.antenna && !c.isMini) {
+    const mount = antennaMount(rows, top + Math.round(c.y))
+    if (mount) {
+      const lx = mount.x + (lean && mount.row < leanRows ? 1 : 0)
+      drawAntenna(w, c, c.facing === 1 ? left + lx : left + sw - 1 - lx, top + mount.row, put)
+    }
+  }
+
   if (c.carrying) {
     const bx = Math.round(sw / 2) - 2
     for (let dy = -2; dy < 0; dy++) for (let dx = 0; dx < 4; dx++) at(bx + dx, dy, BRICK)
@@ -1925,6 +1947,11 @@ function drawBody(w: World, c: Body, put: Put): void {
     for (let r = 1; r <= legLen; r++) at(lx, s.h - 1 + r, c.color)
   }
 
+  if (w.antenna && !c.isMini) {
+    const ax = lean // the back edge of the top row, which leans with the run
+    drawAntenna(w, c, c.facing === 1 ? left + ax : left + s.w - 1 - ax, top, put)
+  }
+
   if (c.carrying) {
     const bx = Math.round(s.w / 2) - 2
     for (let dy = -2; dy < 0; dy++) for (let dx = 0; dx < 4; dx++) at(bx + dx, dy, BRICK)
@@ -1944,6 +1971,66 @@ function drawScroll(c: Body, left: number, width: number, from: number, rows: nu
     at(lx, row, color)
     at(lx + 1, row, color)
   })
+}
+
+/**
+ * Where the antenna stands on a look: on the back edge of the part that holds
+ * the eyes (pixels 8-connected to an `o`, or all pixels when it has none), so
+ * not on a tentacle or a mark beside the head. On the part's top row, or, on a
+ * round head, as far down its back edge as the whole antenna needs to fit in
+ * the band (user, 2026-10-08, after a sheet of placements on the real emotes).
+ * `restTop` is the look's top row with Clawd on the ground, so the mount does
+ * not slide during a hop. Local x from the back, and the row in the look.
+ */
+function antennaMount(rows: string[], restTop: number): { x: number; row: number } | null {
+  const isPixel = (ch: string | undefined) => ch === '#' || ch === 'o' || ch === '+'
+  const part = new Set<string>()
+  const todo: [number, number][] = []
+  rows.forEach((line, r) => [...line].forEach((ch, x) => ch === 'o' && todo.push([x, r])))
+  if (todo.length === 0) rows.forEach((line, r) => [...line].forEach((ch, x) => isPixel(ch) && part.add(`${x},${r}`)))
+  for (const [x, r] of todo) part.add(`${x},${r}`)
+  while (todo.length > 0) {
+    const [x, r] = todo.pop() as [number, number]
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const key = `${x + dx},${r + dy}`
+        if (!part.has(key) && isPixel(rows[r + dy]?.[x + dx])) {
+          part.add(key)
+          todo.push([x + dx, r + dy])
+        }
+      }
+    }
+  }
+  let first: { x: number; row: number } | null = null
+  for (let row = 0; row < rows.length; row++) {
+    const x = [...(rows[row] ?? '')].findIndex((_, col) => part.has(`${col},${row}`))
+    if (x < 0) continue
+    first ??= { x, row }
+    if (antennaTip(restTop + row) >= 0) return { x, row }
+  }
+  return first
+}
+
+/** The row of the antenna's tip over a head whose top row is `top`: alone in the lower half of a cell. */
+function antennaTip(top: number): number {
+  return top - 3 - (((top % 2) + 2) % 2)
+}
+
+/**
+ * The antenna Clawd wears while Remote Control is on: a gray stalk from the
+ * head pixel at screen column x, whose top is row `top`, leaning back a pixel
+ * per row, with a green tip that blinks (user, 2026-10-08: gray, a coloured tip,
+ * "at an angle, not that static straight up"). A cell shows two colours, so the
+ * tip sits alone in the lower half of a cell: the stalk is two pixels high, or
+ * three where the head's top row is the lower half of a cell. The tip needs the
+ * band's second row of headroom, so the band stays 5 rows high while the
+ * antenna is on, and 6 while Clawd wears a tall look (`bandRows`).
+ */
+function drawAntenna(w: World, c: Body, x: number, top: number, put: Put): void {
+  const tip = antennaTip(top)
+  const at = (row: number) => x - c.facing * (top - 1 - row)
+  for (let row = top - 1; row > tip; row--) put(at(row), row, ANTENNA)
+  put(at(tip), tip, w.t % 1.6 < 1.4 ? SIGNAL : SIGNAL_DIM)
 }
 
 /** The band as Raster cells: standard base64 of [codePoint, fg, bg] u32 triplets. */
@@ -1990,8 +2077,8 @@ export function frameCells(w: World): string {
     edge.set(w.cols - 1, rule('╮'))
   }
 
-  // An emote's colours, its prop's, its tool's and the scroll count as a body's; Clawd's own colour, whatever it is now, comes first.
-  const bodyColors = new Set([...BODY_COLORS, PAPER, ROLL])
+  // An emote's colours, its prop's, its tool's, the scroll and the antenna count as a body's; Clawd's own colour, whatever it is now, comes first.
+  const bodyColors = new Set([...BODY_COLORS, PAPER, ROLL, ANTENNA, SIGNAL, SIGNAL_DIM])
   for (const b of bodies(w)) {
     if (b.wearing) bodyColors.add(b.wearing.color).add(b.wearing.accent)
     if (b.wearing?.prop) bodyColors.add(b.wearing.prop.color)

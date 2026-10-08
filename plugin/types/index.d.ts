@@ -1,7 +1,7 @@
 /** Clawd's band state, as kept in $.state. */
 export type ClawdState = {
   isClawdOn: boolean
-  isClawdTall: boolean
+  clawdRows: number
   isTracing: boolean
   isDebugging: boolean
   clawdMenu: {
@@ -19,9 +19,9 @@ declare module 'claude-code' {
     'clawd': {
       /** Clawd, the logo, running in the band above the prompt (/clawd on|off). */
       isClawdOn: boolean
-      /** Clawd's band is a row taller during a big jump. */
-      isClawdTall: boolean
-      /** Each pick goes to picks/<session id>.jsonl in the data folder (/clawd trace [off]). */
+      /** The band's height in rows: 4, 5 during a big jump or a tall look, 6 with the Remote Control antenna on a tall look. */
+      clawdRows: number
+      /** Each pick goes to picks/<session id>.jsonl in the data folder (/clawd trace [on|off]). */
       isTracing: boolean
       /** Each pick's whole reply, tokens and outcome go to the transcript (/clawd debug [on|off]). */
       isDebugging: boolean
