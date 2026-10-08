@@ -178,6 +178,8 @@ function making(f: UmlFacts): string[] {
       "emote in the plugin wins over a model's of the same name. /clawd emote",
       'delete moves an emote to old/. The data folder is clawd/ in the Claude',
       'config folder (~/.claude), or data/ beside the plugin in a checkout.',
+      'Skins are drawn the same way by /clawd skin create or change, into',
+      'skins/; Clawd wears a new one for the session instead of playing it.',
     ]),
     'A built-in act is code: its name in ACTS and a case in runAct (clawd-sim.ts),',
     'a line in PICKABLE so models and made acts may use it, a weight in a random',

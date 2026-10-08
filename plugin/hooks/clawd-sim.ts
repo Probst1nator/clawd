@@ -149,12 +149,14 @@ export type Step = {
 export type Routine = { name: string; title: string; steps: Step[] }
 
 /**
- * A look Clawd takes for a while (user, 2026-10-04): a sprite drawn and
- * animated the way Clawd is, from a JSON file in emotes/ (drawn by hand) or
- * data/emotes/ (drawn by a model). A shape is rows of characters: `#` body,
- * `o` an eye (a hole while open), `+` the accent colour, anything else empty.
+ * A body drawn and animated the way Clawd is, from a JSON file. A shape is
+ * rows of characters: `#` body, `o` an eye (a hole while open), `+` the
+ * accent colour, anything else empty. As a skin (user, 2026-10-08: the MatSci
+ * octopus is no emote), Clawd wears it all the time instead of its own body:
+ * from skins/ (drawn by hand) or data/skins/ (drawn by a model), chosen by
+ * clawd.json, the project folder or `/clawd skin`. Emotes and acts play on it.
  */
-export type Emote = {
+export type Skin = {
   name: string
   title: string
   color: number
@@ -166,6 +168,21 @@ export type Emote = {
   armRow: number | null // the normal shape's row the arms grow from; null: no arms
   armPoses: Record<ArmPose, [number, number][]> // [dx, dy] from the body's edge, as Clawd's
   isTall: boolean // the band grows a row while Clawd wears it, as for a big jump
+}
+
+/**
+ * A look Clawd takes for a while (user, 2026-10-04), from a JSON file in
+ * emotes/ (drawn by hand) or data/emotes/ (drawn by a model). It turns Clawd
+ * into another body, or keeps the body Clawd has, its skin or its own, and
+ * adds a prop or a tool (user, 2026-10-08: the Rietveld pointer on the
+ * octopus); it may do both.
+ */
+export type Emote = {
+  name: string
+  title: string
+  accent: number // the colour of `+` pixels in the body, the prop and the tool
+  isTall: boolean // the band grows a row while Clawd wears it, as for a big jump
+  body: Skin | null // the body it gives Clawd for its time; null: Clawd keeps the one it has
   dur: number // seconds it stays on when played
   prop: Prop | null
   tool: Tool | null
@@ -317,8 +334,7 @@ export type World = Body & {
   minis: Mini[]
   minisMade: number // for the minis' ids and colours
   due: { at: number; who: string; acts: Act[] }[] // model calls waiting for their time
-  base: Emote | null // the look Clawd wears whenever it wears no other; null: Clawd's own
-  baseWorn: Emote | null // the base as Clawd wears it now; null while it wears another look or none
+  skin: Skin | null // the body Clawd has whenever no emote gives it another; null: its own
   antenna: boolean // Remote Control is on: Clawd wears an antenna on whatever look it has
 }
 
@@ -375,8 +391,7 @@ export function createWorld(cols: number, rows: number, rand: () => number = Mat
     minis: [],
     minisMade: 0,
     due: [],
-    base: null,
-    baseWorn: null,
+    skin: null,
     antenna: false,
   }
   resize(w, cols, rows)
@@ -451,14 +466,30 @@ function headroom(w: World): number {
 }
 
 /** How far a standing body's top is above its feet, in sub-pixels. */
-function bodyHeight(c: Body): number {
-  if (c.wearing) return c.wearing.shapes.normal.length + c.wearing.legLength - 1
+function bodyHeight(w: World, c: Body): number {
+  const look = shownLook(w, c)
+  if (look) return look.shapes.normal.length + look.legLength - 1
   return c.isMini ? 3 : 4
 }
 
 /** Sub-pixel rows above a standing body's head; its jumps stay within them. */
 function roomAbove(w: World, c: Body): number {
-  return c.wearing ? Math.max(0, ground(w) - bodyHeight(c)) : headroom(w)
+  return shownLook(w, c) ? Math.max(0, ground(w) - bodyHeight(w, c)) : headroom(w)
+}
+
+/** The body a body would have with room for it: its emote's, else Clawd's skin; null: its own. */
+function wantedLook(w: World, c: Body): Skin | null {
+  return c.wearing?.body ?? (c === w ? w.skin : null)
+}
+
+/**
+ * The body a body has now: its emote's, else Clawd's skin while the band has
+ * room for it, else null: its own. A tall skin needs the tall band, so in a
+ * terminal too short for it Clawd stays Clawd.
+ */
+function shownLook(w: World, c: Body): Skin | null {
+  const look = wantedLook(w, c)
+  return look && (look === c.wearing?.body || !look.isTall || w.rows >= TALL_ROWS) ? look : null
 }
 
 function pileCapacity(w: World): number {
@@ -584,7 +615,7 @@ export function besideClawd(w: World, x: number): number {
 
 /** Clawd's width in sub-pixels, of its look when it wears one. */
 function clawdWidth(w: World): number {
-  const rows = w.wearing?.shapes.normal
+  const rows = shownLook(w, w)?.shapes.normal
   return rows ? Math.max(...rows.map(r => r.length)) : SHAPES.normal.w
 }
 
@@ -610,7 +641,7 @@ export function wantsTall(w: World): boolean {
 /** The band's height in rows that the world wants now: a row more while tall, two with the antenna on a tall look. */
 export function bandRows(w: World): number {
   if (!wantsTall(w)) return BAND_ROWS
-  return w.antenna && w.wearing?.isTall ? ANTENNA_ROWS : TALL_ROWS
+  return w.antenna && wantedLook(w, w)?.isTall ? ANTENNA_ROWS : TALL_ROWS
 }
 
 /** `/clawd [who] <act> [n]`: do it now, `n` times in a row; false when `who` is not there. */
@@ -713,8 +744,8 @@ export function callLabel(w: World, calls: { who: string; name: string }[], note
 
 function actFor(w: World, what: Playable, extra: Partial<Act> = {}): Act {
   if (typeof what === 'string') return make(w, what, extra)
-  if ('shapes' in what) return make(w, 'emote', { emote: what, ...extra })
-  return make(w, 'routine', { routine: what.name, steps: what.steps, ...extra })
+  if ('steps' in what) return make(w, 'routine', { routine: what.name, steps: what.steps, ...extra })
+  return make(w, 'emote', { emote: what, ...extra })
 }
 
 /**
@@ -848,20 +879,28 @@ function toolOf(raw: unknown, accent: number): Tool | string {
   return { rows, color }
 }
 
-/**
- * Checks an emote from a file or a model: a snake_case name that is no
- * built-in act, a title, a colour, and a normal shape that fits the band.
- * Shapes it leaves out are the normal one; numbers are clamped. The answer is
- * the emote, or what is wrong with it.
- */
-export function emoteFrom(raw: unknown): Emote | string {
-  if (typeof raw !== 'object' || raw === null) return 'not an object'
-  const r = raw as Record<string, unknown>
+/** A look's snake_case name that is no built-in act, and its title; or what is wrong with them. */
+function nameOf(r: Record<string, unknown>): { name: string; title: string } | string {
   const name = typeof r.name === 'string' ? r.name : ''
   if (!/^[a-z][a-z0-9_]{1,30}$/.test(name)) return `bad name ${JSON.stringify(r.name)}`
   if ((ACTS as readonly string[]).includes(name) || STEP_KINDS.includes(name as ActKind)) return `${name} is a built-in act`
   const title = typeof r.title === 'string' ? r.title.trim().slice(0, 80) : ''
   if (!title) return 'no title'
+  return { name, title }
+}
+
+/**
+ * Checks a skin from a file or a model: a snake_case name that is no
+ * built-in act, a title, a colour, and a normal shape that fits the band.
+ * Shapes it leaves out are the normal one; numbers are clamped. The answer is
+ * the skin, or what is wrong with it.
+ */
+export function skinFrom(raw: unknown): Skin | string {
+  if (typeof raw !== 'object' || raw === null) return 'not an object'
+  const r = raw as Record<string, unknown>
+  const named = nameOf(r)
+  if (typeof named === 'string') return named
+  const { name, title } = named
   const color = colorOf(r.color)
   if (color === undefined) return `bad color ${JSON.stringify(r.color)}, want #rrggbb`
   const raws = (typeof r.shapes === 'object' && r.shapes !== null ? r.shapes : {}) as Record<string, unknown>
@@ -886,7 +925,6 @@ export function emoteFrom(raw: unknown): Emote | string {
     .filter((x): x is number => typeof x === 'number' && Number.isInteger(x) && x >= 0 && x < nw)
     .slice(0, 8)
   const armRow = typeof r.armRow === 'number' && Number.isInteger(r.armRow) && r.armRow >= 0 && r.armRow < normal.length ? r.armRow : null
-  const dur = typeof r.dur === 'number' && Number.isFinite(r.dur) ? Math.min(20, Math.max(3, r.dur)) : 8
   // Arm poses the file gives replace Clawd's: up to 4 pixels each, within 3 of the edge, in one
   // line: the first touches the edge, each next one the one before. Any other pose keeps Clawd's,
   // since a fork drawn as a tool reads as horns or a tail.
@@ -908,16 +946,60 @@ export function emoteFrom(raw: unknown): Emote | string {
     if (pixels.length > 0 && isLine) armPoses[pose] = pixels
   }
   const accent = colorOf(r.accent) ?? WHITE
+  return { name, title, color, accent, shapes, legs, legLength, isWiggly: r.wiggle === true, armRow, armPoses, isTall }
+}
+
+/**
+ * Checks an emote from a file or a model: a time, and a body as a skin has
+ * (with `shapes`), a prop, a tool, or several of them. Without shapes Clawd
+ * keeps the body it has. The answer is the emote, or what is wrong with it.
+ */
+export function emoteFrom(raw: unknown): Emote | string {
+  if (typeof raw !== 'object' || raw === null) return 'not an object'
+  const r = raw as Record<string, unknown>
+  const named = nameOf(r)
+  if (typeof named === 'string') return named
+  const body = r.shapes === undefined || r.shapes === null ? null : skinFrom(r)
+  if (typeof body === 'string') return body
+  const accent = body?.accent ?? colorOf(r.accent) ?? WHITE
+  const isTall = r.tall === true
+  const dur = typeof r.dur === 'number' && Number.isFinite(r.dur) ? Math.min(20, Math.max(3, r.dur)) : 8
   const prop = r.prop === undefined || r.prop === null ? null : propOf(r.prop, isTall, dur, accent)
   if (typeof prop === 'string') return `prop: ${prop}`
   const tool = r.tool === undefined || r.tool === null ? null : toolOf(r.tool, accent)
   if (typeof tool === 'string') return `tool: ${tool}`
-  return { name, title, color, accent, shapes, legs, legLength, isWiggly: r.wiggle === true, armRow, armPoses, isTall, dur, prop, tool }
+  if (!body && !prop && !tool) return 'no shapes, prop or tool: an emote changes the body, adds a thing, or both'
+  return { ...named, accent, isTall, body, dur, prop, tool }
 }
 
-/** An emote as JSON, the way emoteFrom reads it. */
-export function emoteJson(look: Emote): Record<string, unknown> {
-  const hex = (n: number) => `#${n.toString(16).padStart(6, '0')}`
+/** A skin worn for a while, as an act's emote step may ask: an emote with the skin's body and nothing else. */
+export function skinAsEmote(skin: Skin): Emote {
+  return { name: skin.name, title: skin.title, accent: skin.accent, isTall: skin.isTall, body: skin, dur: 8, prop: null, tool: null }
+}
+
+/**
+ * Whether an emote's body is a copy of Clawd's own: the logo's normal shape
+ * in about its orange. A model that draws a thing to hold tends to copy the
+ * body along with it, and the copy then hides any skin (three emotes had one
+ * until 2026-10-08). A recoloured Clawd is not a copy.
+ */
+export function isClawdCopy(look: Emote): boolean {
+  if (!look.body) return false
+  const { w, h, eyes, eyeRow } = SHAPES.normal
+  const own = Array.from({ length: h }, (_, r) => Array.from({ length: w }, (_, x) => (r === eyeRow && eyes.includes(x) ? 'o' : '#')).join(''))
+  const near = (a: number, b: number) => [16, 8, 0].every(k => Math.abs(((a >> k) & 255) - ((b >> k) & 255)) <= 24)
+  return JSON.stringify(look.body.shapes.normal) === JSON.stringify(own) && near(look.body.color, ORANGE)
+}
+
+/** The colour of an emote's puff: its body's, else its tool's or prop's. */
+function emoteColor(look: Emote): number {
+  return look.body?.color ?? look.tool?.color ?? look.prop?.color ?? look.accent
+}
+
+const hex = (n: number) => `#${n.toString(16).padStart(6, '0')}`
+
+/** A skin as JSON, the way skinFrom reads it. */
+export function skinJson(look: Skin): Record<string, unknown> {
   return {
     name: look.name,
     title: look.title,
@@ -930,6 +1012,14 @@ export function emoteJson(look: Emote): Record<string, unknown> {
     armRow: look.armRow,
     arms: look.armPoses,
     tall: look.isTall,
+  }
+}
+
+/** An emote as JSON, the way emoteFrom reads it. */
+export function emoteJson(look: Emote): Record<string, unknown> {
+  const head = look.body ? skinJson(look.body) : { name: look.name, title: look.title, accent: hex(look.accent), tall: look.isTall }
+  return {
+    ...head,
     dur: look.dur,
     ...(look.prop
       ? { prop: { rows: look.prop.rows, color: hex(look.prop.color), x: look.prop.x, path: look.prop.path, trail: look.prop.hasTrail } }
@@ -952,7 +1042,7 @@ export function linkRoutine<R extends Routine>(r: R, find: (name: string) => Pla
     delete step.inner
     const found = s.name ? find(s.name) : undefined
     if (typeof found !== 'object') return step
-    if (s.do === 'emote' && 'shapes' in found) step.worn = found
+    if (s.do === 'emote' && !('steps' in found)) step.worn = found
     if (s.do === 'play' && !isInner && 'steps' in found) step.inner = linkRoutine(found, find, true).steps
     return step
   })
@@ -1012,7 +1102,7 @@ export function step(w: World): void {
     physics(w, c)
     if (c.wearing?.prop) moveProp(w, c, c.wearing.prop)
     if (c.wearing && w.t >= c.wornUntil && !isAirborne(c)) {
-      puff(w, c, c.wearing.color)
+      puff(w, c, emoteColor(c.wearing))
       const prop = c.wearing.prop
       if (prop) {
         // A prop left on the floor breaks apart like a mined block; one still in the air goes in a puff.
@@ -1022,8 +1112,8 @@ export function step(w: World): void {
       }
       c.wearing = null
     }
-    if (c === w) wearBase(w)
-    if (c.wearing?.isTall) w.tallUntil = w.t + TALL_HOLD_S
+    // A tall look keeps the band tall; a tall skin all the time, so the prompt does not move between looks.
+    if (c.wearing?.isTall || wantedLook(w, c)?.isTall) w.tallUntil = w.t + TALL_HOLD_S
   }
   if (w.antenna) w.tallUntil = w.t + TALL_HOLD_S // the antenna's tip needs the second row of headroom
   moveParticles(w)
@@ -1209,7 +1299,7 @@ function runAct(w: World, c: Body, a: Act): boolean {
         if (!isAirborne(c)) c.vx = c.facing * 14
         if (e > 0.25) {
           nextStage(w, a)
-          spawn(w, { x: c.x + c.facing * reach, row: ground(w) - bodyHeight(c), vx: c.facing * 4, vrow: -4, fall: 20, life: 1, glyph: "'", color: SWEAT })
+          spawn(w, { x: c.x + c.facing * reach, row: ground(w) - bodyHeight(w, c), vx: c.facing * 4, vrow: -4, fall: 20, life: 1, glyph: "'", color: SWEAT })
         }
         return false
       }
@@ -1307,7 +1397,7 @@ function runAct(w: World, c: Body, a: Act): boolean {
         c.lookUp = true
       } else {
         c.shape = 'squash'
-        jumpUp(w, c, ground(w) - bodyHeight(c) - s.row + 1)
+        jumpUp(w, c, ground(w) - bodyHeight(w, c) - s.row + 1)
       }
       return false
     }
@@ -1428,10 +1518,11 @@ function runAct(w: World, c: Body, a: Act): boolean {
       if (e < 0.15 || (look.isTall && w.rows < TALL_ROWS && e < 0.3)) return false
       // A tall emote in a terminal too short for the tall band would lose its head.
       if (look.isTall && w.rows < TALL_ROWS) return true
-      puff(w, c, look.color)
+      puff(w, c, emoteColor(look))
       wear(w, c, look, a.dur)
-      // A routine's emote step goes straight on with the routine.
-      if (a.routine) return true
+      // A routine's emote step goes straight on with the routine, and so do
+      // more calls from the same pick: [rietveld_refinement, run] runs in it.
+      if (a.routine || (a.isPick && c.queue.some(q => q.isPick))) return true
       // Shows itself off, then goes on with whatever comes, still in the look.
       const flags = { isPick: a.isPick, isReflex: a.isReflex }
       c.queue.unshift(
@@ -1484,7 +1575,7 @@ function spawn(w: World, p: Omit<Particle, 'age'>): void {
 
 // `!` or `?` above the head, or in front of it when the band has no room above.
 function mark(w: World, c: Body, glyph: string, color: number): void {
-  const top = ground(w) - Math.round(c.y) - bodyHeight(c)
+  const top = ground(w) - Math.round(c.y) - bodyHeight(w, c)
   const isAbove = top >= 2
   const reach = isAbove ? (c.isMini ? 1 : 3) : c.isMini ? 5 : 9
   spawn(w, {
@@ -1499,7 +1590,7 @@ function dust(w: World, x: number, row: number, n: number): void {
 }
 
 function burst(w: World, c: Body, n: number): void {
-  const top = ground(w) - Math.round(c.y) - bodyHeight(c) - 2
+  const top = ground(w) - Math.round(c.y) - bodyHeight(w, c) - 2
   const reach = c.isMini ? 5 : 9
   for (let i = 0; i < n; i++) {
     spawn(w, {
@@ -1511,7 +1602,7 @@ function burst(w: World, c: Body, n: number): void {
 
 // A puff of smoke as a body takes or drops an emote's look.
 function puff(w: World, c: Body, color: number): void {
-  puffAt(w, c.x, ground(w) - Math.round(c.y) - bodyHeight(c), bodyHeight(c), 9, color)
+  puffAt(w, c.x, ground(w) - Math.round(c.y) - bodyHeight(w, c), bodyHeight(w, c), 9, color)
 }
 
 // A puff `reach` sub-pixels either side of x, over the rows from `top` down `h`.
@@ -1527,24 +1618,17 @@ function puffAt(w: World, x: number, top: number, h: number, reach: number, colo
 // --- an emote's prop ---------------------------------------------------------------
 
 /**
- * Clawd wears its base look (user, 2026-10-07: the MatSci octopus in
- * clawd-matsci) whenever it wears no other, with no puff when the band starts.
- * Another emote takes over for its time, and the base comes back after it. A
- * base the world no longer names goes the way a look's time ends. A tall base
- * keeps the band tall all the time, so the prompt does not move between looks;
- * the base goes on once the band has grown.
+ * Clawd changes its skin (user, 2026-10-08: /cd into a MatSci folder, or
+ * /clawd skin) with a puff when the body it shows changes, unless `isQuiet`:
+ * as the band starts, Clawd has its skin without one. The same skin read
+ * again from its file changes nothing.
  */
-function wearBase(w: World): void {
-  const base = w.base
-  if (w.baseWorn && w.wearing !== w.baseWorn) w.baseWorn = null // another look took over
-  if (w.baseWorn && w.baseWorn.name !== base?.name) {
-    w.wornUntil = w.t
-    w.baseWorn = null
-  }
-  if (base?.isTall) w.tallUntil = w.t + TALL_HOLD_S
-  if (!base || w.wearing || isAirborne(w) || (base.isTall && w.rows < TALL_ROWS)) return
-  wear(w, w, base, Infinity)
-  w.baseWorn = base
+export function setSkin(w: World, skin: Skin | null, isQuiet = false): void {
+  if (JSON.stringify(skin) === JSON.stringify(w.skin)) return
+  const before = shownLook(w, w)
+  w.skin = skin
+  const after = shownLook(w, w)
+  if (!isQuiet && JSON.stringify(before) !== JSON.stringify(after)) puff(w, w, (after ?? before)?.color ?? ORANGE)
 }
 
 /** A body takes on an emote's look for `dur` seconds; its prop starts beside the body, forward as it faces. */
@@ -1649,7 +1733,7 @@ function breakProp(w: World, c: Body, look: Emote, prop: Prop): void {
 
 function dropBrick(w: World, c: Body): void {
   c.carrying = false
-  const top = ground(w) - Math.round(c.y) - bodyHeight(c) - 3
+  const top = ground(w) - Math.round(c.y) - bodyHeight(w, c) - 3
   for (const dx of [-1, 1]) {
     spawn(w, { x: c.x + dx, row: top, vx: c.facing * 10 + dx * 4, vrow: -8, fall: 60, life: 1, glyph: '▀', color: BRICK })
   }
@@ -1688,7 +1772,7 @@ function moveSpark(w: World): void {
   // Caught when it touches a body's outline.
   for (const c of bodies(w)) {
     const feet = ground(w) - Math.round(c.y)
-    if (Math.abs(s.x - c.x) <= (c.isMini ? 4 : 7) && s.row >= feet - bodyHeight(c) - 1 && s.row <= feet) {
+    if (Math.abs(s.x - c.x) <= (c.isMini ? 4 : 7) && s.row >= feet - bodyHeight(w, c) - 1 && s.row <= feet) {
       w.spark = null
       burst(w, c, 6)
       return
@@ -1735,7 +1819,7 @@ function shapeNow(w: World, c: Body): Shape {
 // walked. Wiggly legs sway at the tips while standing, trail straight while
 // rising and flare out while falling. Walking and running, a ripple runs from
 // the back tentacle to the front one.
-function drawWorn(w: World, c: Body, look: Emote, put: Put): void {
+function drawWorn(w: World, c: Body, look: Skin, put: Put): void {
   const airborne = isAirborne(c)
   const speed = Math.abs(c.vx)
   const shape = shapeNow(w, c)
@@ -1820,10 +1904,12 @@ function drawWorn(w: World, c: Body, look: Emote, put: Put): void {
   })
 
   const ar = look.armRow === null ? h - 2 : nh > 1 ? Math.min(h - 1, Math.round((look.armRow * (h - 1)) / (nh - 1))) : 0
+  const line = rows[ar] ?? ''
+  const first = line.search(/[#o+]/)
+  const last = Math.max(line.lastIndexOf('#'), line.lastIndexOf('o'), line.lastIndexOf('+'))
+  // A body without arms holds a tool against its front edge.
+  if (look.armRow === null && first >= 0 && c.arms !== 'none') drawTool(c, last, ar, at)
   if (look.armRow !== null) {
-    const line = rows[ar] ?? ''
-    const first = line.search(/[#o+]/)
-    const last = Math.max(line.lastIndexOf('#'), line.lastIndexOf('o'), line.lastIndexOf('+'))
     const flip = Math.floor(w.t * 6) % 2 === 1
     const { up, down, raised } = look.armPoses
     // Wiggly arms curl their tips up now and then. Crawling, each curls for the first half of its stride.
@@ -1840,19 +1926,8 @@ function drawWorn(w: World, c: Body, look: Emote, put: Put): void {
     if (first >= 0) {
       for (const [dx, dy] of back) at(first - dx, ar + dy, look.color)
       for (const [dx, dy] of front) at(last + dx, ar + dy, look.color)
-      // The tool's bottom row starts one pixel past the front hand. Reading, that hand holds the scroll.
       const hand = front.at(-1)
-      if (look.tool && hand && !c.reading) {
-        const tool = look.tool
-        const bottom = tool.rows.length - 1
-        const grip = (tool.rows[bottom] ?? '').search(/[#+]/)
-        tool.rows.forEach((line, r) => {
-          for (let col = 0; col < line.length; col++) {
-            const ch = line[col]
-            if (ch === '#' || ch === '+') at(last + hand[0] + 1 + col - grip, ar + hand[1] + r - bottom, ch === '+' ? look.accent : tool.color)
-          }
-        })
-      }
+      if (hand) drawTool(c, last + hand[0], ar + hand[1], at)
     }
   }
 
@@ -1884,7 +1959,8 @@ function drawWorn(w: World, c: Body, look: Emote, put: Put): void {
 }
 
 function drawBody(w: World, c: Body, put: Put): void {
-  if (c.wearing) return drawWorn(w, c, c.wearing, put)
+  const look = shownLook(w, c)
+  if (look) return drawWorn(w, c, look, put)
   const airborne = isAirborne(c)
   const speed = Math.abs(c.vx)
   let shape: Shape = c.shape ?? 'normal'
@@ -1961,6 +2037,8 @@ function drawBody(w: World, c: Body, put: Put): void {
   else if (c.arms === 'none') back = front = []
   for (const [dx, dy] of back) at(-dx, s.armRow + dy, c.color)
   for (const [dx, dy] of front) at(s.w - 1 + dx, s.armRow + dy, c.color)
+  const hand = front.at(-1)
+  if (hand) drawTool(c, s.w - 1 + hand[0], s.armRow + hand[1], at)
   if (c.reading) {
     const rows = c.isMini ? [s.armRow - 2, s.armRow - 1, s.armRow] : [s.armRow - 2, s.armRow - 1, s.armRow, s.armRow + 1]
     drawScroll(c, left, s.w, s.w - 1 + OUT.length, rows, at)
@@ -1979,6 +2057,26 @@ function drawBody(w: World, c: Body, put: Put): void {
     const bx = Math.round(s.w / 2) - 2
     for (let dy = -2; dy < 0; dy++) for (let dx = 0; dx < 4; dx++) at(bx + dx, dy, BRICK)
   }
+}
+
+/**
+ * The worn emote's tool in the front hand, whose tip is at local (hx, hy):
+ * the first pixel of its bottom row sits one pixel past the tip, so the tool
+ * follows the arm's pose without turning, on any body. Reading, that hand
+ * holds the scroll instead.
+ */
+function drawTool(c: Body, hx: number, hy: number, at: Put): void {
+  const look = c.wearing
+  const tool = look?.tool
+  if (!look || !tool || c.reading) return
+  const bottom = tool.rows.length - 1
+  const grip = (tool.rows[bottom] ?? '').search(/[#+]/)
+  tool.rows.forEach((line, r) => {
+    for (let col = 0; col < line.length; col++) {
+      const ch = line[col]
+      if (ch === '#' || ch === '+') at(hx + 1 + col - grip, hy + r - bottom, ch === '+' ? look.accent : tool.color)
+    }
+  })
 }
 
 /**
@@ -2101,14 +2199,16 @@ export function frameCells(w: World): string {
     edge.set(w.cols - 1, rule('╮'))
   }
 
-  // An emote's colours, its prop's, its tool's, the scroll and the antenna count as a body's; Clawd's own colour, whatever it is now, comes first.
+  // A skin's or an emote's colours, its prop's, its tool's, the scroll and the antenna count as a body's; Clawd's own colour, whatever it is now, comes first.
   const bodyColors = new Set([...BODY_COLORS, PAPER, ROLL, ANTENNA, SIGNAL, SIGNAL_DIM])
   for (const b of bodies(w)) {
-    if (b.wearing) bodyColors.add(b.wearing.color).add(b.wearing.accent)
+    const look = shownLook(w, b)
+    if (look) bodyColors.add(look.color).add(look.accent)
+    if (b.wearing) bodyColors.add(b.wearing.accent)
     if (b.wearing?.prop) bodyColors.add(b.wearing.prop.color)
     if (b.wearing?.tool) bodyColors.add(b.wearing.tool.color)
   }
-  const main = w.wearing?.color ?? ORANGE
+  const main = shownLook(w, w)?.color ?? ORANGE
 
   const words = new Uint32Array(w.cols * w.rows * 3)
   for (let cy = 0; cy < w.rows; cy++) {
@@ -2157,8 +2257,8 @@ export function frameCells(w: World): string {
 
 // --- the preview -----------------------------------------------------------------
 
-// An emote's preview is a sheet of panels, each the band as a terminal shows
-// it, with the body held in one pose. The panels go through the real drawing,
+// An emote's or a skin's preview is a sheet of panels, each the band as a
+// terminal shows it, with the body held in one pose. The panels go through the real drawing,
 // frameCells included, so what the preview shows is what the band will show.
 const POSES: [string, (w: World) => void][] = [
   ['standing', () => {}],
@@ -2197,7 +2297,7 @@ export const PREVIEW_PROP_POSES = PROP_POSES.map(([label]) => label)
 const SHEET = POSES.filter(([label]) => ['standing', 'walking', 'rising in a jump (stretch)', 'lying flat after a trip', 'waving'].includes(label))
 /** What each line of a drafts sheet shows, left to right. */
 export const SHEET_POSES = SHEET.map(([label]) => label)
-const PREVIEW_COLS = 14
+const PREVIEW_COLS = 14 // the least width of a panel; a wide body, tool or prop widens all panels of a sheet
 const CELL_W = 10 // pixels; a terminal cell is about twice as high as wide
 const CELL_H = 20
 const GAP = 4
@@ -2211,37 +2311,76 @@ const DIGITS = [
   '.###..####.####', '###..#.#..#..#.', '####.#####.####', '####.####..###.',
 ]
 
-/** The preview of an emote: a PNG of the band in every pose of PREVIEW_POSES, then PREVIEW_PROP_POSES if it has a prop. */
-export function emotePreview(look: Emote): Uint8Array {
+/**
+ * The preview of an emote: a PNG of the band in every pose of PREVIEW_POSES,
+ * then PREVIEW_PROP_POSES if it has a prop. An emote without a body shows on
+ * `skin`, the skin Clawd wears now, and then the same lines again on Clawd's
+ * own body (user, 2026-10-08), since it plays on whatever body Clawd has;
+ * without a skin, once on Clawd's own body.
+ */
+export function emotePreview(look: Emote, skin: Skin | null = null): Uint8Array {
   const poses = look.prop ? [...POSES, ...PROP_POSES] : POSES
-  return sheet(poses.map(([, set]) => ({ look, set })), PREVIEW_PER_LINE, 0)
+  const bodies = !look.body && skin ? [skin, null] : [skin]
+  // Each body starts on a line of its own.
+  const lines = (body: Skin | null) => {
+    const panels: (Panel | null)[] = poses.map(([, set]) => ({ skin: body, look, set }))
+    while (panels.length % PREVIEW_PER_LINE !== 0) panels.push(null)
+    return panels
+  }
+  return sheet(bodies.flatMap(lines), PREVIEW_PER_LINE, 0)
+}
+
+/** The preview of a skin: a PNG of the band in every pose of PREVIEW_POSES. */
+export function skinPreview(skin: Skin): Uint8Array {
+  return sheet(POSES.map(([, set]) => ({ skin, look: null, set })), PREVIEW_PER_LINE, 0)
 }
 
 /**
  * Drafts of an emote side by side: a PNG with one line per draft, in the poses
- * of SHEET_POSES, and the draft's number at the left of its line.
+ * of SHEET_POSES, and the draft's number at the left of its line. With a skin
+ * on, a draft without a body shows the same poses again on Clawd's own body,
+ * to the right on its line.
  */
-export function emoteSheet(looks: Emote[]): Uint8Array {
-  return sheet(looks.flatMap(look => SHEET.map(([, set]) => ({ look, set }))), SHEET.length, NUMBER_W)
+export function emoteSheet(looks: Emote[], skin: Skin | null = null): Uint8Array {
+  const isTwice = skin !== null && looks.some(look => !look.body)
+  const line = (look: Emote): (Panel | null)[] => [
+    ...SHEET.map(([, set]) => ({ skin, look, set })),
+    ...(isTwice ? SHEET.map(([, set]) => (look.body ? null : { skin: null, look, set })) : []),
+  ]
+  return sheet(looks.flatMap(line), SHEET.length * (isTwice ? 2 : 1), NUMBER_W)
 }
 
-// Where Clawd stands in a panel: in the middle, or with a prop off the middle,
-// so that Clawd, its arms and the prop at its start are centred together.
-function previewX(look: Emote): number {
-  const prop = look.prop
-  if (!prop) return PREVIEW_COLS
-  const half = Math.max(...look.shapes.normal.map(line => line.length)) / 2 + 2
+/** Drafts of a skin side by side, as emoteSheet draws an emote's. */
+export function skinSheet(skins: Skin[]): Uint8Array {
+  return sheet(skins.flatMap(skin => SHEET.map(([, set]) => ({ skin, look: null, set }))), SHEET.length, NUMBER_W)
+}
+
+/** A preview panel: Clawd in a skin, or its own body, wearing an emote or none, held in a pose. */
+type Panel = { skin: Skin | null; look: Emote | null; set: (w: World) => void }
+
+// How far a panel's Clawd reaches back and forward from its centre, in
+// sub-pixels: its body and arms, the tool in its front hand, and its prop
+// where the look starts it. Clawd faces forward, to the right.
+function reach({ skin, look }: Panel): [number, number] {
+  const body = (look?.body ?? skin)?.shapes.normal
+  const half = (body ? Math.max(...body.map(line => line.length)) : SHAPES.normal.w) / 2 + 2
+  const tool = look?.tool
+  const front = half + (tool ? 2 + Math.max(...tool.rows.map(line => line.length)) : 0)
+  const prop = look?.prop
+  if (!prop) return [-half, front]
   const pw = Math.max(...prop.rows.map(line => line.length))
-  const lo = Math.min(-half, prop.x - pw / 2)
-  const hi = Math.max(half, prop.x + pw / 2)
-  return Math.round(PREVIEW_COLS - (lo + hi) / 2)
+  return [Math.min(-half, prop.x - pw / 2), Math.max(front, prop.x + pw / 2)]
 }
 
 // A PNG of panels, perLine to a line, each the band with Clawd in a look and
-// held in a pose. A margin of `numbers` pixels gets each line's number.
-function sheet(panels: { look: Emote; set: (w: World) => void }[], perLine: number, numbers: number): Uint8Array {
+// held in a pose; a null panel stays empty. A margin of `numbers` pixels gets
+// each line's number. All panels are as wide as the widest one needs, so that
+// Clawd, its arms, its tool and its prop at the start are centred together.
+function sheet(panels: (Panel | null)[], perLine: number, numbers: number): Uint8Array {
   const rows = TALL_ROWS
-  const panelW = PREVIEW_COLS * CELL_W
+  const spans = panels.map(panel => (panel ? reach(panel) : null))
+  const cols = Math.max(PREVIEW_COLS, ...spans.map(span => (span ? Math.ceil((span[1] - span[0]) / 2) + 1 : 0)))
+  const panelW = cols * CELL_W
   const panelH = rows * CELL_H
   const lines = Math.ceil(panels.length / perLine)
   const width = numbers + perLine * (panelW + GAP) + GAP
@@ -2262,20 +2401,26 @@ function sheet(panels: { look: Emote; set: (w: World) => void }[], perLine: numb
     for (let yy = y; yy < y + h; yy++) image.fill(i, yy * width + x, yy * width + x + w)
   }
   const masks = new Map(QUAD.map((cp, mask) => [cp, mask]))
-  panels.forEach(({ look, set }, k) => {
-    const w = createWorld(PREVIEW_COLS, rows, seeded(1))
+  panels.forEach((panel, k) => {
+    const span = spans[k]
+    if (!panel || !span) return
+    const { skin, look, set } = panel
+    const w = createWorld(cols, rows, seeded(1))
     w.queue = []
-    Object.assign(w, { x: previewX(look), t: 5, blinkAt: 999 })
-    wear(w, w, look)
-    w.wornUntil = Infinity
+    w.skin = skin
+    Object.assign(w, { x: Math.round(cols - (span[0] + span[1]) / 2), t: 5, blinkAt: 999 })
+    if (look) {
+      wear(w, w, look)
+      w.wornUntil = Infinity
+    }
     set(w)
     const bytes = (Uint8Array as unknown as { fromBase64(s: string): Uint8Array }).fromBase64(frameCells(w))
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
     const ox = numbers + GAP + (k % perLine) * (panelW + GAP)
     const oy = GAP + Math.floor(k / perLine) * (panelH + GAP)
     for (let cy = 0; cy < rows; cy++) {
-      for (let cx = 0; cx < PREVIEW_COLS; cx++) {
-        const i = (cy * PREVIEW_COLS + cx) * 12
+      for (let cx = 0; cx < cols; cx++) {
+        const i = (cy * cols + cx) * 12
         const glyph = view.getUint32(i, true)
         const fg = view.getUint32(i + 4, true)
         const bg = view.getUint32(i + 8, true)

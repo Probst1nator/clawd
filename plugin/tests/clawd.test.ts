@@ -22,13 +22,16 @@ import {
   seeded,
   setEdge,
   setLabel,
+  setSkin,
+  skinAsEmote,
+  skinFrom,
   spawnMini,
   step,
   wantsTall,
   MINI_GAP,
   WALK,
 } from '../hooks/clawd-sim'
-import type { Emote, Routine } from '../hooks/clawd-sim'
+import type { Emote, Routine, Skin } from '../hooks/clawd-sim'
 import { UML_LEGEND, UML_WIDTH, clawdUml, umlKinds } from '../hooks/clawd-uml'
 import { COMMANDS, marksFor, menuFor, menuLayout, orderOf, writeOut } from '../hooks/clawd-words'
 import type { Names } from '../hooks/clawd-words'
@@ -702,11 +705,11 @@ test('an emote is checked, Clawd turns into it with a puff, keeps the tall band 
     'normal is 7 high with its legs, at most 6 (8 with "tall": true)',
   )
   const look = emoteFrom(OCTOPUS) as Emote
-  expect(look.shapes.stretch).toEqual(OCTOPUS.shapes.normal)
-  expect(look.armPoses.out).toEqual([[1, 1], [2, 1]])
-  expect(look.armPoses.up).toEqual([[1, -1], [2, -2]])
+  expect(look.body?.shapes.stretch).toEqual(OCTOPUS.shapes.normal)
+  expect(look.body?.armPoses.out).toEqual([[1, 1], [2, 1]])
+  expect(look.body?.armPoses.up).toEqual([[1, -1], [2, -2]])
   // A forked pose, such as a pickaxe in the claw, keeps Clawd's.
-  expect((emoteFrom({ ...OCTOPUS, arms: { out: [[1, 0], [2, 0], [2, -1], [2, 1]] } }) as Emote).armPoses.out).toEqual([[1, 0], [2, 0]])
+  expect((emoteFrom({ ...OCTOPUS, arms: { out: [[1, 0], [2, 0], [2, -1], [2, 1]] } }) as Emote).body?.armPoses.out).toEqual([[1, 0], [2, 0]])
 
   const w = createWorld(40, 5, seeded(6))
   w.queue = []
@@ -733,37 +736,121 @@ test('an emote is checked, Clawd turns into it with a puff, keeps the tall band 
   expect(colors(frameCells(w)).has(0xd77757)).toBe(true)
 })
 
-test('with a base look Clawd wears it from the start without a puff, another emote takes over for its time, and the base comes back', async () => {
-  const base = emoteFrom(OCTOPUS) as Emote
+test('a skin is Clawd\'s body from the start without a puff, an emote takes over for its time and the skin comes back, and a change of skin puffs', async () => {
+  const skin = skinFrom(OCTOPUS) as Skin
   const frog = emoteFrom({ ...OCTOPUS, name: 'frog', color: '#40c060', dur: 2 }) as Emote
   const w = createWorld(40, 5, seeded(6))
-  w.base = base
-  step(w)
-  expect(w.wearing?.name).toBe('octo')
-  expect(w.particles.some(p => p.glyph === 'o')).toBe(false)
   w.queue = []
   w.x = 30
+  setSkin(w, skin, true)
+  step(w)
+  expect(w.wearing).toBe(null)
+  expect(colors(frameCells(w)).has(0x649feb)).toBe(true)
+  expect(colors(frameCells(w)).has(0xd77757)).toBe(false)
+  expect(w.particles.some(p => p.glyph === 'o')).toBe(false)
   w.act = { kind: 'idle', t0: 0, stage: 0, dur: 99, next: 99, look: 0 }
   perform(w, frog)
   for (let i = 0; i < 20 * 3 && w.wearing?.name !== 'frog'; i++) step(w)
   expect(w.wearing?.name).toBe('frog')
-  for (let i = 0; i < 20 * 10 && w.wearing?.name !== 'octo'; i++) step(w)
-  expect(w.wearing?.name).toBe('octo')
-  expect(w.tallUntil).toBeGreaterThan(w.t)
-  // Without a base the look goes as any look's time ends.
-  w.base = null
-  for (let i = 0; i < 20 * 3 && w.wearing; i++) step(w)
+  expect(colors(frameCells(w)).has(0x40c060)).toBe(true)
+  expect(colors(frameCells(w)).has(0x649feb)).toBe(false)
+  for (let i = 0; i < 20 * 10 && w.wearing; i++) step(w)
   expect(w.wearing).toBe(null)
-  // A tall base does not fit a 4-row band: the band asks to grow, and Clawd
+  step(w)
+  expect(colors(frameCells(w)).has(0x649feb)).toBe(true)
+  expect(w.tallUntil).toBeGreaterThan(w.t)
+  // The same skin read again from its file changes nothing; another skin, or none, puffs.
+  w.particles = []
+  setSkin(w, skinFrom(OCTOPUS) as Skin)
+  expect(w.particles.length).toBe(0)
+  setSkin(w, null)
+  expect(w.particles.some(p => p.glyph === 'o')).toBe(true)
+  step(w)
+  expect(colors(frameCells(w)).has(0xd77757)).toBe(true)
+  // An act's emote step may name a skin: Clawd wears it for a while.
+  const glide = linkRoutine(routineFrom({ name: 'glide', title: 'glides', steps: [{ do: 'emote', name: 'octo' }, { do: 'hop' }] }) as Routine, n =>
+    n === 'octo' ? skinAsEmote(skin) : undefined,
+  )
+  expect(glide.steps[0]?.worn?.name).toBe('octo')
+  // A tall skin does not fit a 4-row band: the band asks to grow, and Clawd
   // stays Clawd until it has (for good in a terminal too short for it).
   const low = createWorld(40, 4, seeded(6))
-  low.base = base
+  low.queue = []
+  low.x = 30
+  setSkin(low, skin, true)
   step(low)
-  expect(low.wearing).toBe(null)
+  expect(colors(frameCells(low)).has(0x649feb)).toBe(false)
   expect(wantsTall(low)).toBe(true)
+  expect(bandRows(low)).toBe(5)
   resize(low, 40, 5)
   step(low)
-  expect(low.wearing?.name).toBe('octo')
+  expect(colors(frameCells(low)).has(0x649feb)).toBe(true)
+})
+
+test('without a clawd.json skin, a project root with "matsci" in its path, in any case, gives Clawd the MatSci octopus skin, moving the root takes it off and puts it back, and /clawd skin chooses for the session', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_700_000_000_000 })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/t', CLAUDE_CLAWD_SEED: '7' })
+  const files = new Map([['/home/t/.claude/clawd/skins/matsci_octopus.json', JSON.stringify({ ...OCTOPUS, name: 'matsci_octopus' })]])
+  on('fs.list', async ($, e) => ({
+    value: [...files.keys()]
+      .filter(p => p.startsWith(`${e.path}/`) && !p.slice(e.path.length + 1).includes('/'))
+      .map(p => ({ name: p.slice(e.path.length + 1), kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false })),
+  }))
+  on('fs.read', async ($, e) => ({ value: files.get(e.path) ?? '' }))
+  let root = '/home/t/repos/MatSci/project'
+  on('session.root', async () => ({ value: root }))
+  const blits: string[] = []
+  on('ui.log', async () => ({ value: undefined }))
+  on('command.register', async ($, e) => ({ value: { command: e.name } }))
+  on('ui.blit', async ($, e) => {
+    if ('cells' in e) blits.push(e.cells)
+    return { value: {} }
+  })
+  on('session.start', async ($, e) => ({ cwd: e.cwd }))
+  on('ui.render', async ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return h(Text, { dimColor: true }, 'engine band') as RenderElement
+  })
+  const octopus = (from: number) => blits.slice(from).filter(c => colors(c).has(0x649feb)).length
+
+  await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
+  await $.ui.mount({
+    plugin: 'clawd',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 100, scroll: { offset: 0, bodyRows: 20 }, view: {} },
+    viewport: { columns: 100, rows: 40 },
+  })
+  await clock.advance(2000)
+  expect(octopus(0)).toBeGreaterThan(5)
+
+  root = '/home/t/proj' // /cd out of MatSci: the octopus puffs back into Clawd
+  await clock.advance(3000)
+  const out = blits.length
+  await clock.advance(2000)
+  expect(blits.length).toBeGreaterThan(out)
+  expect(octopus(out)).toBe(0)
+
+  root = '/home/t/notes/matsci'
+  await clock.advance(3000)
+  expect(octopus(out)).toBeGreaterThan(5)
+
+  // /clawd skin none keeps Clawd's own body for the session, also when the root moves; auto goes back.
+  const run = (args: string) =>
+    $.command.run({ command: 'clawd', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+  expect((await run('skin'))?.text).toMatch(/^Skin: matsci_octopus \("a blue octopus"\); the project folder has "matsci" in its path\./)
+  expect((await run('skin none'))?.text).toBe("Clawd: Skin: none, Clawd's own body; chosen with /clawd skin for this session. /clawd skin auto goes back.")
+  root = '/home/t/notes/matsci/sub'
+  await clock.advance(3000)
+  const none = blits.length
+  await clock.advance(2000)
+  expect(octopus(none)).toBe(0)
+  expect((await run('skin auto'))?.text).toMatch(/^Clawd: Skin: matsci_octopus/)
+  await clock.advance(3000)
+  expect(octopus(none)).toBeGreaterThan(5)
+  expect((await run('list skins'))?.text).toContain('matsci_octopus  a blue octopus')
+  expect((await run('emote matsci_octopus'))?.text).toMatch(/^Clawd: nothing is called "matsci_octopus"/)
 })
 
 test('the autopicker calls no model until /clawd autopick switches it on, picks on its timer once on, and stops when switched off', { timeoutMs: 20_000 }, async ($, on) => {
@@ -798,7 +885,7 @@ test('the autopicker calls no model until /clawd autopick switches it on, picks 
   await clock.advance(61_000)
   expect(triggers).toEqual([])
   expect((await run(''))?.text).toContain('The autopicker is off, so Clawd plays random acts')
-  expect((await run('autopick o'))?.text).toBe('Clawd: /clawd autopick takes now, on, off or nothing.')
+  expect((await run('autopick o'))?.text).toBe('Clawd: /clawd autopick takes now, on, off, haiku, sonnet, opus or nothing.')
 
   await $.ui.mount({
     plugin: 'clawd',
@@ -821,6 +908,59 @@ test('the autopicker calls no model until /clawd autopick switches it on, picks 
   expect(triggers.length).toBe(picked + 1)
 })
 
+test('the autopicker asks haiku until /clawd autopick sonnet or opus switches the model, which leaves it off', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_700_000_000_000 })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/t', CLAUDE_CLAWD_SEED: '7' })
+  const models: string[] = []
+  const usage = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+  on('ui.log', async () => ({ value: undefined }))
+  on('command.register', async ($, e) => ({ value: { command: e.name } }))
+  on('ui.blit', async () => ({ value: {} }))
+  on('process.run', async () => ({
+    value: { exitCode: 0, stdout: 'Sat 17:00\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+  }))
+  on('model.complete', async ($, e) => {
+    models.push(e.model)
+    const text = '{"summary": "", "calls": [{"who": "clawd", "play": "wave"}], "why": "", "new": null}'
+    return { value: { isAnswered: true as const, text, usage } }
+  })
+  on('session.start', async ($, e) => ({ cwd: e.cwd }))
+  on('ui.render', async ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return h(Text, { dimColor: true }, 'engine band') as RenderElement
+  })
+
+  await $.session.start({ cwd: '/home/t/proj', surface: 'terminal', isInteractive: true })
+  await $.ui.mount({
+    plugin: 'clawd',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 40, scroll: { offset: 0, bodyRows: 20 }, view: {} },
+    viewport: { columns: 100, rows: 40 },
+  })
+  await clock.advance(200)
+  const run = (args: string) =>
+    $.command.run({ command: 'clawd', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+  const pickOnce = async () => {
+    await run('autopick now')
+    await clock.advance(200)
+  }
+  expect((await run(''))?.text).toContain('Picker model: haiku.')
+  await pickOnce()
+  expect(models).toEqual(['haiku'])
+  expect((await run('autopick sonnet'))?.text).toBe(
+    'Clawd: the autopicker uses sonnet (remembered). Each pick costs more of your Claude usage than with haiku. The autopicker is off; /clawd autopick turns it on.',
+  )
+  await pickOnce()
+  expect((await run('autopick op'))?.text).toMatch(/^Clawd: the autopicker uses opus \(remembered\)\./)
+  await pickOnce()
+  expect(models).toEqual(['haiku', 'sonnet', 'opus'])
+  expect((await run('autopick on'))?.text).toContain('opus picks what plays')
+  expect((await run('autopick haiku'))?.text).toBe('Clawd: the autopicker uses haiku (remembered).')
+  expect((await run(''))?.text).toContain('Picker model: haiku.')
+})
+
 test('an emote preview is a PNG of the band in every pose, and a drafts sheet has a numbered line per draft', async () => {
   const png = emotePreview(emoteFrom(OCTOPUS) as Emote)
   expect([...png.subarray(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
@@ -835,6 +975,23 @@ test('an emote preview is a PNG of the band in every pose, and a drafts sheet ha
   const withProp = emotePreview(emoteFrom(ROCKET) as Emote)
   const propHead = new DataView(withProp.buffer, withProp.byteOffset, withProp.byteLength)
   expect([propHead.getUint32(16), propHead.getUint32(20)]).toEqual([6 * 144 + 4, 4 * 104 + 4])
+
+  // A look that keeps the body, on a skin: its 3 lines on the skin, then 3 on Clawd's own body.
+  // An 18-wide skin, as wide as the MatSci octopus, with a 6-wide pointer needs 16 cells a
+  // panel: 11 sub-pixels back, 11 + 2 + 6 forward, plus one cell.
+  const size = (png: Uint8Array) => {
+    const v = new DataView(png.buffer, png.byteOffset, png.byteLength)
+    return [v.getUint32(16), v.getUint32(20)]
+  }
+  const pointer = emoteFrom({ name: 'pointer', title: 'taps a chart', tool: { rows: ['######'], color: '#8b5a2b' } }) as Emote
+  const octopus = skinFrom({ ...OCTOPUS, shapes: { normal: ['#'.repeat(18), `##o${'#'.repeat(12)}o##`, '#'.repeat(18)] }, legs: [1, 8, 16] }) as Skin
+  expect(size(emotePreview(pointer, octopus))).toEqual([6 * 164 + 4, 6 * 104 + 4])
+  expect(size(emotePreview(pointer))).toEqual([6 * 144 + 4, 3 * 104 + 4])
+  // A look with a body shows once, on its own body.
+  expect(size(emotePreview(emoteFrom(OCTOPUS) as Emote, octopus))).toEqual([6 * 144 + 4, 3 * 104 + 4])
+  // In a drafts sheet, a draft that keeps the body gets its poses on Clawd's own body to the right.
+  expect(size(emoteSheet([pointer, emoteFrom(OCTOPUS) as Emote], octopus))).toEqual([20 + 10 * 164 + 4, 2 * 104 + 4])
+  expect(size(emoteSheet([pointer]))).toEqual([20 + 5 * 144 + 4, 104 + 4])
 })
 
 test('a wiggly look crawls in a ripple, one tip lifted at a time and the body level, walking and running', async () => {
@@ -965,6 +1122,78 @@ test("an emote's tool is checked, written back, held past the front hand as Claw
   expect(cellsWith(frameCells(w), 40, 0x8b5a2b)).toEqual([])
 })
 
+test('an emote without shapes keeps the body Clawd has, its own or its skin, and adds its tool and prop; a pick that calls more for Clawd skips the show-off', async () => {
+  const POINTER = {
+    name: 'pointer',
+    title: 'taps a chart with a pointer',
+    dur: 5,
+    tool: { rows: ['...+', '###.'], color: '#8b5a2b' },
+    prop: { rows: ['####', '#..#', '####'], color: '#3a7bd5', x: 12, path: [{ t: 0, y: 0 }] },
+  }
+  expect(emoteFrom({ name: 'nothing', title: 'nothing at all', dur: 4 })).toBe('no shapes, prop or tool: an emote changes the body, adds a thing, or both')
+  const look = emoteFrom(POINTER) as Emote
+  expect(look.body).toBe(null)
+  expect(emoteFrom(emoteJson(look))).toEqual(look)
+  const columns = (cells: string[]) => cells.map(cell => Number(cell.split(',')[0]))
+  const idle = { kind: 'idle' as const, t0: 0, stage: 0, dur: 99, next: 99, look: 0 as const }
+
+  // On Clawd's own body: it stays orange and holds the pointer past its front hand.
+  const w = createWorld(40, 4, seeded(6))
+  w.queue = []
+  w.x = 40
+  w.act = { ...idle }
+  perform(w, look)
+  for (let i = 0; i < 20 * 3 && !w.wearing; i++) step(w)
+  for (let i = 0; i < 10; i++) step(w) // out of the squash it puts the look on in
+  // The puff takes the tool's colour; it goes before the pixels are read.
+  Object.assign(w, { vx: 0, blinkAt: 999, particles: [] })
+  const own = colors(frameCells(w))
+  expect([own.has(0xd77757), own.has(0x8b5a2b), own.has(0x3a7bd5)]).toEqual([true, true, true])
+  const ahead = columns(cellsWith(frameCells(w), 40, 0x8b5a2b))
+  expect(ahead.length).toBeGreaterThan(0)
+  expect(ahead.every(col => col > w.x / 2 + 2)).toBe(true)
+
+  // On the octopus skin: the body stays the blue octopus, with the pointer and the chart.
+  const o = createWorld(40, 5, seeded(6))
+  o.queue = []
+  o.x = 40
+  setSkin(o, skinFrom(OCTOPUS) as Skin, true)
+  o.act = { ...idle }
+  perform(o, look)
+  for (let i = 0; i < 20 * 3 && !o.wearing; i++) step(o)
+  for (let i = 0; i < 10; i++) step(o)
+  Object.assign(o, { vx: 0, blinkAt: 999, particles: [] })
+  const skinned = colors(frameCells(o))
+  expect([skinned.has(0x649feb), skinned.has(0xd77757), skinned.has(0x8b5a2b), skinned.has(0x3a7bd5)]).toEqual([true, false, true, true])
+
+  // A skin without arms holds the pointer against its front edge.
+  const a = createWorld(40, 5, seeded(6))
+  a.queue = []
+  a.x = 40
+  setSkin(a, skinFrom({ ...OCTOPUS, armRow: null }) as Skin, true)
+  a.act = { ...idle }
+  perform(a, look)
+  for (let i = 0; i < 20 * 3 && !a.wearing; i++) step(a)
+  for (let i = 0; i < 10; i++) step(a)
+  Object.assign(a, { vx: 0, blinkAt: 999, particles: [] })
+  expect(colors(frameCells(a)).has(0x8b5a2b)).toBe(true)
+
+  // Called alone it shows itself off; with a run after it in the same pick, the run plays in it at once.
+  const p = createWorld(40, 4, seeded(6))
+  p.queue = []
+  p.x = 20
+  callActs(p, [{ who: 'clawd', what: look, delay: 0 }, { who: 'clawd', what: 'run', delay: 0 }])
+  for (let i = 0; i < 20 * 3 && !p.wearing; i++) step(p)
+  expect(p.wearing?.name).toBe('pointer')
+  expect(p.queue.map(a => a.kind)).toEqual(['run'])
+  const q = createWorld(40, 4, seeded(6))
+  q.queue = []
+  q.x = 20
+  callActs(q, [{ who: 'clawd', what: look, delay: 0 }])
+  for (let i = 0; i < 20 * 3 && !q.wearing; i++) step(q)
+  expect(q.queue.map(a => a.kind)).toEqual(['idle', 'wave', 'hop'])
+})
+
 test('/clawd emote create has a model draw three drafts after a local image, pick one from their sheet, check its preview, and it plays', async ($, on) => {
   const clock = mock.clock(on, { now: 1_700_000_000_000 })
   mock.store(on)
@@ -1087,6 +1316,7 @@ test('/clawd emote create has a model draw three drafts after a local image, pic
 const NAMES: Names = {
   minis: { a1: 'the mini for "Find auth code"' },
   emotes: { moon_jelly: 'a moon jellyfish' },
+  skins: { matsci_octopus: 'the MatSci octopus' },
   made: { octopus_wiggle: 'turns into an octopus', build: 'builds something' },
   acts: { jump: 'a big jump sideways', hop: 'a small hop', celebrate: 'two hops', chase: 'chases a sparkle', wave: 'waves' },
 }
@@ -1103,7 +1333,8 @@ test('/clawd words may be cut short while they fit one name, and say what is wro
   expect(orderOf(['?'], NAMES)).toEqual({ kind: 'command', name: 'help', rest: [] })
   expect(orderOf(['help', 'uml'], NAMES)).toEqual({ kind: 'command', name: 'help', rest: ['uml'] })
   expect(orderOf(['list', 'emote'], NAMES)).toEqual({ kind: 'list', of: 'emotes' })
-  expect(orderOf(['list'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: list what? /clawd list acts | made | emotes | minis.' })
+  expect(orderOf(['list'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: list what? /clawd list acts | made | emotes | skins | minis.' })
+  expect(orderOf(['list', 'sk'], NAMES)).toEqual({ kind: 'list', of: 'skins' })
   expect(orderOf(['pick'], NAMES)).toEqual({ kind: 'command', name: 'autopick', rest: [] })
   expect(orderOf(['of'], NAMES)).toEqual({ kind: 'command', name: 'off', rest: [] })
   expect(orderOf(['emote', 'cre', 'frog', 'a', 'frog'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: type create in full; it starts a model run.' })
@@ -1121,6 +1352,18 @@ test('/clawd words may be cut short while they fit one name, and say what is wro
   expect(orderOf(['o'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: "o" fits 3 names: on, off, octopus_wiggle. Type more of it.' })
   expect(orderOf(['act', 'moon'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: moon_jelly is an emote; /clawd emote moon_jelly plays it.' })
   expect(orderOf(['a1', 'moon'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: emotes are for Clawd only, not for a1.' })
+  // A skin is worn all session: it takes /clawd skin, and is no act or emote.
+  expect(orderOf(['skin'], NAMES)).toEqual({ kind: 'command', name: 'skin', rest: [] })
+  expect(orderOf(['skin', 'mats'], NAMES)).toEqual({ kind: 'command', name: 'skin', rest: ['matsci_octopus'] })
+  expect(orderOf(['skin', 'au'], NAMES)).toEqual({ kind: 'command', name: 'skin', rest: ['auto'] })
+  expect(orderOf(['skin', 'none'], NAMES)).toEqual({ kind: 'command', name: 'skin', rest: ['none'] })
+  expect(orderOf(['skin', 'prev', 'mats'], NAMES)).toEqual({ kind: 'command', name: 'skin', rest: ['preview', 'mats'] })
+  expect(orderOf(['skin', 'edit', 'matsci_octopus', 'rounder'], NAMES)).toEqual({ kind: 'command', name: 'skin', rest: ['change', 'matsci_octopus', 'rounder'] })
+  expect(orderOf(['skin', 'dele', 'matsci_octopus'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: type delete in full; it removes a skin.' })
+  expect(orderOf(['skin', 'delete', 'mats'], NAMES)).toEqual({ kind: 'unclear', text: "Clawd: type the skin's full name: /clawd skin delete matsci_octopus." })
+  expect(orderOf(['skin', 'frog'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: nothing is called "frog". /clawd list skins shows what there is.' })
+  expect(orderOf(['matsci'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: matsci_octopus is a skin; /clawd skin matsci_octopus puts it on for this session.' })
+  expect(orderOf(['emote', 'matsci_octopus'], NAMES).kind).toBe('unclear')
 })
 
 test('while /clawd is typed, a framed list shows what the word fits, a space writes it out, and the words are marked', () => {
@@ -1132,8 +1375,8 @@ test('while /clawd is typed, a framed list shows what the word fits, a space wri
   expect(menu('/clawd ')).toMatchObject({ title: '/clawd', note: 'type to narrow, space writes a single fit out', isOne: false, count: '' })
   const top = menu('/clawd ')
   expect(top && menuLayout(top, 7)).toEqual({
-    rows: ['help', 'act', 'emote', 'list', 'on', 'off', 'autopick'].map(name => ({ name, what: COMMANDS[name], from: 0, to: 0 })),
-    foot: '+3 more: trace debug a1',
+    rows: ['help', 'act', 'emote', 'skin', 'list', 'on', 'off'].map(name => ({ name, what: COMMANDS[name], from: 0, to: 0 })),
+    foot: '+4 more: autopick trace debug a1',
   })
   expect(menu('/clawd act c')).toEqual({
     title: '/clawd act',
@@ -1156,17 +1399,17 @@ test('while /clawd is typed, a framed list shows what the word fits, a space wri
   })
   expect(menu('/clawd wave')).toMatchObject({ note: '', isOne: true, rows: [{ name: 'wave', what: 'act: waves' }] })
   // At the top the kinds mix, so each row says its kind, and no next step is shared.
-  expect(menu('/clawd o')).toMatchObject({ count: '3 of 18 fit', next: '' })
+  expect(menu('/clawd o')).toMatchObject({ count: '3 of 19 fit', next: '' })
   expect(menu('/clawd o')?.rows[2]).toEqual({ name: 'octopus_wiggle', what: 'made act: turns into an octopus', from: 0, to: 1 })
   expect(menu('/clawd wig')?.rows).toEqual([{ name: 'octopus_wiggle', what: 'made act: turns into an octopus', from: 8, to: 11 }])
   const o = menu('/clawd o')
-  expect(o && menuLayout(o, 2).foot).toBe('3 of 18 fit · +1 more: octopus_wiggle')
+  expect(o && menuLayout(o, 2).foot).toBe('3 of 19 fit · +1 more: octopus_wiggle')
   expect(menu('/clawd act ')).toMatchObject({ title: '/clawd act', note: '7 acts' })
   expect(names('/clawd act ')).toEqual(['octopus_wiggle', 'build', 'jump', 'hop', 'celebrate', 'chase', 'wave'])
   expect(names('/clawd a1 ')).toEqual(['octopus_wiggle', 'build', 'jump', 'hop', 'celebrate', 'chase', 'wave'])
   expect(names('/clawd emote ')).toEqual(['create', 'change', 'delete', 'preview', 'moon_jelly'])
   expect(names('/clawd emote edit ')).toEqual(['moon_jelly'])
-  expect(names('/clawd list ')).toEqual(['acts', 'made', 'emotes', 'minis'])
+  expect(names('/clawd list ')).toEqual(['acts', 'made', 'emotes', 'skins', 'minis'])
   expect(names('/clawd help ')).toEqual(['uml'])
   expect(menu('/clawd moo')).toMatchObject({ note: 'space writes it out', isOne: true, next: '' })
   expect(menu('/clawd jump ')).toMatchObject({ title: '/clawd jump', note: '[1-5] times in a row', rows: [] })

@@ -39,11 +39,13 @@ so older versions may not load it.
 | `/clawd help` | every command; `help uml` draws how Clawd behaves |
 | `/clawd jump 3` | play an act now, up to 5 times in a row |
 | `/clawd a1 wave` | a subagent's small Clawd plays an act |
-| `/clawd list acts` | the acts; also `made`, `emotes`, `minis` |
-| `/clawd emote <emote>` | Clawd takes an emote's look for a while |
+| `/clawd list acts` | the acts; also `made`, `emotes`, `skins`, `minis` |
+| `/clawd emote <emote>` | for a while, Clawd turns into an emote's look or holds its thing |
 | `/clawd emote create`, `change`, `delete`, `preview` | make, redraw, remove or picture an emote |
+| `/clawd skin <skin>`, `none`, `auto` | the body Clawd wears all the time, for this session |
+| `/clawd skin create`, `change`, `delete`, `preview` | make, redraw, remove or picture a skin |
 | `/clawd on`, `/clawd off` | show or hide Clawd |
-| `/clawd autopick` | switch a model choosing what Clawd plays on or off (see below); `now` chooses once |
+| `/clawd autopick` | switch a model choosing what Clawd plays on or off (see below); `now` chooses once; `haiku`, `sonnet` or `opus` sets the model |
 | `/clawd debug` | switch showing each autopick's whole reply in the transcript on or off |
 | `/clawd trace` | switch writing each autopick to a file on or off |
 
@@ -59,18 +61,21 @@ session and picks what Clawd and the small Clawds play: after each prompt and tu
 every 10 to 60 seconds. In a busy session that is about 100 calls an hour of about 1,500
 tokens each, and it may have Opus write up to 5 new acts or looks a day. All of it runs
 through your own Claude Code login and counts against your usage. `/clawd autopick`
-again stops it. The setting is remembered.
+again stops it. `/clawd autopick sonnet` or `opus` has that model pick instead, at a
+higher cost per pick, and `/clawd autopick haiku` goes back. Both settings are remembered.
 
 While Remote Control is on, Clawd wears an antenna and the autopicker pauses, so Clawd
 plays random acts. When Remote Control ends, the autopicker goes on as it was set.
 
-`/clawd emote create <name> <what it looks like>` has Opus draw a new emote, a look Clawd
-takes for a while, and `/clawd emote change <emote> <what to change>` redraws one. Each
-runs only when you type it.
+`/clawd emote create <name> <what it looks like>` has Opus draw a new emote: a look Clawd
+turns into for a while, or a thing it holds or sets down beside it while it keeps its body.
+`/clawd skin create <name> <what it looks like>` draws a skin, a body Clawd wears all the
+time. `/clawd emote change` and `/clawd skin change` redraw one. Each runs only when you
+type it.
 
 ## Where it keeps things
 
-New acts, emotes, their preview images and the autopick traces (`/clawd trace`) go to
+New acts, emotes, skins, their preview images and the autopick traces (`/clawd trace`) go to
 `~/.claude/clawd/`, or `$CLAUDE_CONFIG_DIR/clawd/` when that is set. A plugin update
 leaves that folder alone. Writing preview images needs `python3` on the PATH.
 

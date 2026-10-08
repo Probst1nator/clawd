@@ -1,6 +1,6 @@
 {
   "name": "clawd",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Clawd, the Claude Code logo, runs around in the band above the prompt and reacts to the session.",
   "author": { "name": "Steffen Probst" },
   "types": "./types/index.d.ts"

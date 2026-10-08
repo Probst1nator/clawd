@@ -4,6 +4,7 @@ export type ClawdState = {
   clawdRows: number
   isTracing: boolean
   isDebugging: boolean
+  clawdSkin: string | null
   clawdMenu: {
     title: string
     note: string
@@ -19,12 +20,14 @@ declare module 'claude-code' {
     'clawd': {
       /** Clawd, the logo, running in the band above the prompt (/clawd on|off). */
       isClawdOn: boolean
-      /** The band's height in rows: 4, 5 during a big jump or a tall look, 6 with the Remote Control antenna on a tall look. */
+      /** The band's height in rows: 4, 5 during a big jump or a tall look or skin, 6 with the Remote Control antenna on a tall look or skin. */
       clawdRows: number
       /** Each pick goes to picks/<session id>.jsonl in the data folder (/clawd trace [on|off]). */
       isTracing: boolean
       /** Each pick's whole reply, tokens and outcome go to the transcript (/clawd debug [on|off]). */
       isDebugging: boolean
+      /** The skin /clawd skin chose for this session: a skin's name, '' for Clawd's own body; null: none chosen, clawd.json or the project folder decides. */
+      clawdSkin: string | null
       /** The framed list above the prompt while a /clawd command is typed (clawd-words.ts `Menu`); null otherwise. */
       clawdMenu: {
         title: string
