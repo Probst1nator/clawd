@@ -21,6 +21,7 @@ const EASE_S = 0.4 // an eased move takes this long to reach full speed, and to 
 export const SLEEP_AFTER_S = 180 // idle seconds without any session event
 export const MINI_STALE_S = 900 // a mini whose subagent was silent this long leaves
 export const MAX_MINIS = 6 // minis on screen at once; more subagents get none
+export const MINI_GAP = 6 // sub-pixels a mini's stop keeps clear of Clawd's edge (besideClawd)
 export const MAX_DELAY_S = 5 // how far ahead a model's call may start
 const LAYERS = [4, 3, 2, 1] // bricks per pile layer, bottom up, as far as the band is tall
 /** The band's height in rows, and its height while a body does a big jump. */
@@ -561,9 +562,30 @@ export function spawnMini(w: World, agentId: string, title: string, kind: string
     isLeaving: false,
     isGone: false,
   }
-  mini.queue.push(reflex(w, 'run', { to: between(w, 0.1, 0.7) * W }), reflex(w, 'alert'))
+  mini.queue.push(reflex(w, 'run', { to: besideClawd(w, between(w, 0.1, 0.7) * W) }), reflex(w, 'alert'))
   w.minis.push(mini)
   return mini
+}
+
+/**
+ * Where a mini headed for x stops instead, so it stands beside Clawd rather
+ * than behind it: x moved out of Clawd's width plus MINI_GAP, to the nearer
+ * side, or to the other one when the nearer side is off the band.
+ */
+export function besideClawd(w: World, x: number): number {
+  const W = width(w)
+  const reach = clawdWidth(w) / 2 + MINI_GAP
+  if (Math.abs(x - w.x) >= reach) return x
+  const left = w.x - reach
+  const right = w.x + reach
+  const sides = x < w.x ? [left, right] : [right, left]
+  return sides.find(to => to >= 8 && to <= W - 8) ?? x
+}
+
+/** Clawd's width in sub-pixels, of its look when it wears one. */
+function clawdWidth(w: World): number {
+  const rows = w.wearing?.shapes.normal
+  return rows ? Math.max(...rows.map(r => r.length)) : SHAPES.normal.w
 }
 
 /** A subagent ended: its mini celebrates (or trips) and runs off the band. */
@@ -1126,6 +1148,7 @@ function runAct(w: World, c: Body, a: Act): boolean {
           a.kind === 'run'
             ? (c.x < W / 2 ? between(w, 0.7, 0.92) : between(w, 0.08, 0.3)) * W
             : Math.min(W - 8, Math.max(8, c.x + (w.rand() < 0.5 ? -1 : 1) * between(w, 20, 70)))
+        if (c.isMini) a.to = besideClawd(w, a.to)
       }
       if (isAirborne(c)) return false
       return go(a.to, true, true)
@@ -2044,8 +2067,9 @@ export function frameCells(w: World): string {
   }
   drawPile(w, put)
   for (const b of bodies(w)) if (b.wearing?.prop) drawProp(w, b, b.wearing, put)
-  for (const m of w.minis) drawBody(w, m, put)
+  // The minis go in front: they are small, and Clawd drawn over them hid them whole.
   drawBody(w, w, put)
+  for (const m of w.minis) drawBody(w, m, put)
 
   const glyphs = new Map<number, Particle>()
   for (const p of w.particles) glyphs.set(Math.floor(p.row / 2) * w.cols + Math.floor(p.x / 2), p)

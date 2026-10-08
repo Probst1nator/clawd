@@ -1,0 +1,1 @@
+# No Python dependencies. A cli-tools-kit installer needs this file next to main.py.

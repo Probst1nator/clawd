@@ -3,6 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import {
   bandRows,
+  besideClawd,
   callActs,
   createWorld,
   emoteFrom,
@@ -24,6 +25,7 @@ import {
   spawnMini,
   step,
   wantsTall,
+  MINI_GAP,
   WALK,
 } from '../hooks/clawd-sim'
 import type { Emote, Routine } from '../hooks/clawd-sim'
@@ -456,6 +458,34 @@ test('a mini Clawd comes for a subagent, takes parallel calls with a delay, and 
   expect(callActs(w, [{ who: 'a1', what: 'hop', delay: 0 }])).toEqual([])
   run(12)
   expect(w.minis.length).toBe(0)
+})
+
+test('a mini stops beside Clawd, not behind it, and is drawn in front of Clawd', async () => {
+  const w = createWorld(100, 4, seeded(4))
+  w.x = 100
+  const reach = 6 + MINI_GAP // half of Clawd's 12 sub-pixels, plus the gap
+  expect(besideClawd(w, 40)).toBe(40)
+  expect(besideClawd(w, 95)).toBe(100 - reach)
+  expect(besideClawd(w, 105)).toBe(100 + reach)
+  w.x = 12 // no room on the left: the right side
+  expect(besideClawd(w, 10)).toBe(12 + reach)
+
+  // Every mini that runs in for a subagent stops clear of Clawd.
+  for (let seed = 1; seed <= 20; seed++) {
+    const v = createWorld(60, 4, seeded(seed))
+    v.x = 50 // in mid-band, where the minis run to; a new world has Clawd walk in from the left
+    const mini = spawnMini(v, 'agent-x', 'Find auth code', 'Explore')
+    expect(Math.abs((mini?.queue[0]?.to ?? 0) - v.x)).toBeGreaterThanOrEqual(reach)
+  }
+
+  // Standing on Clawd's spot, a mini still shows.
+  const u = createWorld(60, 4, seeded(4))
+  const mini = spawnMini(u, 'agent-x', 'Find auth code', 'Explore')
+  if (!mini) throw new Error('no mini')
+  mini.queue = []
+  u.x = 40
+  mini.x = 40
+  expect(colors(frameCells(u)).has(mini.color)).toBe(true)
 })
 
 test('a subagent gets a mini Clawd, and the picker calls Clawd and the mini in one pick, the mini a second later', async ($, on) => {
@@ -1483,8 +1513,11 @@ test('while Remote Control is on, the autopicker pauses and its setting stays on
   await clock.advance(200)
   expect(triggers).toEqual(['asked with /clawd autopick now'])
 
+  // Clawd falls asleep 180 s after the last session event and then skips timer
+  // picks; a wave keeps it awake for the next wait.
+  await run('wave')
   delete env.CLAUDE_CODE_BRIDGE_SESSION_ID
-  await clock.advance(61_000)
+  await clock.advance(70_000) // a 1 s poll, then a pick within 10 to 60 s
   expect(triggers.length).toBeGreaterThan(1)
   expect((await run(''))?.text).not.toContain('paused')
 })
