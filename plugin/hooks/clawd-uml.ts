@@ -1,9 +1,6 @@
-// `/clawd help uml` (user, 2026-10-06: "a uml diagram which can be displayed
-// via /clawd help which shows the way clawd behaves and new movements are
-// created and registered"). A command's answer is transcript text, so the
+// `/clawd help uml`. A command's answer is transcript text, so the
 // diagrams are box-drawing characters, at most UML_WIDTH columns wide. A
-// CommandOutput render hook in register.tsx colours them by umlKinds (user,
-// 2026-10-06: "can you make the clawd uml colored?"); the stored row stays
+// CommandOutput render hook in register.tsx colours them by umlKinds; the stored row stays
 // plain text. Pure, no `$`: register.tsx passes the numbers in, so a changed
 // constant shows here too.
 
@@ -16,7 +13,7 @@ export type UmlFacts = {
   pickMinS: number
   pickMaxS: number
   maxDelayS: number // a pick's calls start up to this far apart
-  newPerDay: number // new acts and emotes the autopicker may ask for in 24 h
+  newPerDay: number // new acts, emotes and skins the autopicker may ask for in 24 h
   maxSteps: number // steps in a made act
   emoteDrafts: number
   emoteRounds: number
@@ -129,57 +126,68 @@ function pair(left: readonly string[], right: readonly string[]): string[] {
   return beside([40, fill(left)], [37, fill(right)])
 }
 
-/** How a new act or emote comes about, and how Clawd finds it afterwards. */
+/** How a new act, emote or skin comes about, and how Clawd finds it afterwards. */
 function making(f: UmlFacts): string[] {
-  const right = 43 // the column of the emote flow
+  const right = 43 // the column of the look flow
+  const ask = '◇──[new.look: become, hold or skin]'
   return [
-    '3. A new act or emote (UML activity diagram)',
+    '3. A new act, emote or skin (UML activity diagram)',
     '',
-    at([3, '●  autopick'], [right, '●  /clawd emote create or change']),
-    at([3, '▼'], [right, '│']),
+    at([3, '●  autopick'], [right, '●  /clawd emote or skin']),
+    at([3, '▼'], [right, '│  create or change']),
     ...beside(
-      [right, node(36, [`${f.pickModel} reads what happened and every`, 'name; it answers with calls, why and', 'new: an act or a look it wants'])],
+      [right, node(36, [`${f.pickModel} reads what happened and every`, 'name; it answers with calls, why and', 'new: an act, emote or skin it wants'])],
       [1, ['│', '│', '│', '│', '│']],
     ),
     at([3, '│ plays the calls'], [right, '│']),
     at([3, `◇──[no new, or ${f.newPerDay} made in 24 h]──▶ ◉`], [right, '│']),
-    at([3, '◇──[the name exists]──▶ play it ──▶ ◉'], [right, '│']),
-    at([3, `◇──[new.look]${'─'.repeat(right - 16)}┤`]),
-    at([3, '│ [a move]'], [right, '│ [no emote being drawn]']),
-    at([3, '▼'], [right, '▼']),
+    at([3, '◇──[it exists]──▶ play or wear it ──▶ ◉'], [right, '│']),
+    at([3, `${ask}${'─'.repeat(right - 3 - cells(ask))}┤`]),
+    at([3, '│ [a move]'], [right, '│ [nothing being made]']),
+    at([3, '│◀──● /clawd act create or change'], [right, '▼']),
+    at([3, '▼']),
     ...pair(
-      node(34, [`${f.makeModel} writes 1 to ${f.maxSteps} steps from the`, 'pickable acts and pose, mark and', 'sparks (makeAct)']),
+      node(34, [
+        `${f.makeModel} writes 1 to ${f.maxSteps} steps from the`,
+        'pickable acts and pose, mark and',
+        'sparks. A change starts from the',
+        'steps as they are; one with no',
+        'words writes it again. (makeAct)',
+      ]),
       node(33, [
         `${f.makeModel} draws it in up to ${f.emoteRounds} rounds:`,
-        `${f.emoteDrafts} drafts on one sheet; it picks`,
-        'one and fixes it, then checks its',
-        'preview. A change starts from the',
-        'emote as it is.',
-        '(drawEmote; claude -p per round)',
+        `${f.emoteDrafts} drafts on one sheet, told the`,
+        'others of its kind; it picks one,',
+        'fixes it and checks its preview.',
+        'A change starts from the look as',
+        'it is; one with no words draws it',
+        'again from scratch.',
+        '(makeEmote; claude -p per round)',
       ]),
     ),
     at([3, '◇──[routineFrom refuses]──▶ ◉'], [right, '◇──[no usable draft]──▶ ◉']),
     at([3, '▼'], [right, '▼']),
     ...pair(
-      node(34, ['write acts/<name>.json in the', 'data folder']),
-      node(33, ['write emotes/<name>.json and a', 'preview PNG in the data folder; a', 'change moves the old file to', 'emotes/old/ there']),
+      node(34, ['write acts/<name>.json in the', 'data folder; a change or rewrite', 'moves the old file to acts/old/']),
+      node(33, ['write <kind>s/<name>.json and a', 'preview PNG in the data folder; a', 'change or redraw moves the old', 'file to <kind>s/old/ there']),
     ),
     at([3, '▼'], [right, '▼']),
-    ...pair(node(34, ['play it on new.for, or on Clawd']), node(33, ['Clawd plays it'])),
+    ...pair(node(34, ['play it on new.for, or on Clawd']), node(33, ['Clawd plays an emote, or wears a', 'skin for the session'])),
     at([3, '▼'], [right, '▼']),
     at([3, '◉'], [right, '◉']),
     '',
     ...note(72, [
       'Registered: there is no list to add a name to. Each autopick, each',
-      '/clawd and the menu while you type read acts/ and emotes/ in the data',
-      "folder and the plugin's emotes/ afresh. The next pick offers the new",
-      `name to ${f.pickModel}, and /clawd <name> and /clawd list take it at once,`,
-      'without a reload. A file that fails the check is skipped. A hand-drawn',
-      "emote in the plugin wins over a model's of the same name. /clawd emote",
-      'delete moves an emote to old/. The data folder is clawd/ in the Claude',
-      'config folder (~/.claude), or data/ beside the plugin in a checkout.',
-      'Skins are drawn the same way by /clawd skin create or change, into',
-      'skins/; Clawd wears a new one for the session instead of playing it.',
+      '/clawd and the menu while you type read acts/, emotes/ and skins/ in',
+      "the data folder and the plugin's emotes/ and skins/ afresh. The next",
+      `pick offers the new name to ${f.pickModel}, and /clawd <name> and /clawd list`,
+      'take it at once, without a reload. A file that fails the check is',
+      "skipped. A hand-drawn look in the plugin wins over a model's of the",
+      'same name. /clawd act, emote or skin delete moves the file to old/.',
+      'The data folder is clawd/ in the Claude config folder (~/.claude), or',
+      'data/ beside the plugin in a checkout. A skin the autopicker makes or',
+      'calls stays on for the session. A skin chosen with /clawd skin wins,',
+      'and the autopicker then gets no skins.',
     ]),
     'A built-in act is code: its name in ACTS and a case in runAct (clawd-sim.ts),',
     'a line in PICKABLE so models and made acts may use it, a weight in a random',

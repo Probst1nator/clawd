@@ -151,8 +151,7 @@ export type Routine = { name: string; title: string; steps: Step[] }
 /**
  * A body drawn and animated the way Clawd is, from a JSON file. A shape is
  * rows of characters: `#` body, `o` an eye (a hole while open), `+` the
- * accent colour, anything else empty. As a skin (user, 2026-10-08: the MatSci
- * octopus is no emote), Clawd wears it all the time instead of its own body:
+ * accent colour, anything else empty. As a skin, Clawd wears it all the time instead of its own body:
  * from skins/ (drawn by hand) or data/skins/ (drawn by a model), chosen by
  * clawd.json, the project folder or `/clawd skin`. Emotes and acts play on it.
  */
@@ -171,11 +170,10 @@ export type Skin = {
 }
 
 /**
- * A look Clawd takes for a while (user, 2026-10-04), from a JSON file in
+ * A look Clawd takes for a while, from a JSON file in
  * emotes/ (drawn by hand) or data/emotes/ (drawn by a model). It turns Clawd
  * into another body, or keeps the body Clawd has, its skin or its own, and
- * adds a prop or a tool (user, 2026-10-08: the Rietveld pointer on the
- * octopus); it may do both.
+ * adds a prop or a tool; it may do both.
  */
 export type Emote = {
   name: string
@@ -189,8 +187,7 @@ export type Emote = {
 }
 
 /**
- * A thing Clawd holds in its front hand while it wears the look (user,
- * 2026-10-06: a pointer for the Rietveld chart). It has its own colours, so it
+ * A thing Clawd holds in its front hand while it wears the look. It has its own colours, so it
  * does not read as a horn or a tail the way a tool drawn into the arms does.
  * The first pixel of its bottom row sits one pixel past the front arm's tip,
  * so it follows the arm's pose without turning.
@@ -201,7 +198,7 @@ export type Tool = {
 }
 
 /**
- * An object beside Clawd that is not part of its body (user, 2026-10-05): it
+ * An object beside Clawd that is not part of its body: it
  * starts `x` sub-pixels from Clawd's centre, forward as Clawd faces when the
  * look starts, and from then on keeps to its path, wherever Clawd goes.
  */
@@ -455,7 +452,7 @@ function width(w: World): number {
 // The feet stand on the upper half of the band's last row, as in the logo
 // (`▘▘ ▝▝`), and the rest of that row is a floor line (`─`) for them to stand
 // on. Claude Code keeps a blank row above the prompt box that no mod reaches,
-// so the floor is as close to the prompt as Clawd gets (user, 2026-10-03).
+// so the floor is as close to the prompt as Clawd gets.
 function ground(w: World): number {
   return w.rows * 2 - 2
 }
@@ -477,19 +474,13 @@ function roomAbove(w: World, c: Body): number {
   return shownLook(w, c) ? Math.max(0, ground(w) - bodyHeight(w, c)) : headroom(w)
 }
 
-/** The body a body would have with room for it: its emote's, else Clawd's skin; null: its own. */
-function wantedLook(w: World, c: Body): Skin | null {
-  return c.wearing?.body ?? (c === w ? w.skin : null)
-}
-
 /**
- * The body a body has now: its emote's, else Clawd's skin while the band has
- * room for it, else null: its own. A tall skin needs the tall band, so in a
- * terminal too short for it Clawd stays Clawd.
+ * The body a body has now: its emote's, else Clawd's skin; null: its own. A
+ * tall skin shows in any band; in a terminal too short for the tall band its
+ * head is cut off at the top.
  */
 function shownLook(w: World, c: Body): Skin | null {
-  const look = wantedLook(w, c)
-  return look && (look === c.wearing?.body || !look.isTall || w.rows >= TALL_ROWS) ? look : null
+  return c.wearing?.body ?? (c === w ? w.skin : null)
 }
 
 function pileCapacity(w: World): number {
@@ -641,7 +632,7 @@ export function wantsTall(w: World): boolean {
 /** The band's height in rows that the world wants now: a row more while tall, two with the antenna on a tall look. */
 export function bandRows(w: World): number {
   if (!wantsTall(w)) return BAND_ROWS
-  return w.antenna && wantedLook(w, w)?.isTall ? ANTENNA_ROWS : TALL_ROWS
+  return w.antenna && shownLook(w, w)?.isTall ? ANTENNA_ROWS : TALL_ROWS
 }
 
 /** `/clawd [who] <act> [n]`: do it now, `n` times in a row; false when `who` is not there. */
@@ -1113,7 +1104,7 @@ export function step(w: World): void {
       c.wearing = null
     }
     // A tall look keeps the band tall; a tall skin all the time, so the prompt does not move between looks.
-    if (c.wearing?.isTall || wantedLook(w, c)?.isTall) w.tallUntil = w.t + TALL_HOLD_S
+    if (c.wearing?.isTall || shownLook(w, c)?.isTall) w.tallUntil = w.t + TALL_HOLD_S
   }
   if (w.antenna) w.tallUntil = w.t + TALL_HOLD_S // the antenna's tip needs the second row of headroom
   moveParticles(w)
@@ -1144,8 +1135,7 @@ function nextAct(w: World, c: Body): Act {
   return make(w, 'idle', { isRandom: true })
 }
 
-// The jump act, the sparkle chase and the turn-end hops get the tall band
-// (user, 2026-10-03: "Grow for big jumps").
+// The jump act, the sparkle chase and the turn-end hops get the tall band.
 function isBigJump(a: Act): boolean {
   return a.kind === 'jump' || a.kind === 'chase' || (a.kind === 'hop' && a.sparks === true)
 }
@@ -1221,7 +1211,7 @@ function runAct(w: World, c: Body, a: Act): boolean {
       const go = (to: number, isStart: boolean, isEnd: boolean) =>
         moveTo(c, to, a.ease ? eased(speed, e, to - c.x, isStart, isEnd) : speed)
       if (a.wrap) {
-        // A lap (user, 2026-10-06): off the edge ahead, straight back in from the
+        // A lap: off the edge ahead, straight back in from the
         // other edge, on to `to`, by default where it started.
         if (isAirborne(c)) return false
         if (a.stage === 0) {
@@ -1618,8 +1608,7 @@ function puffAt(w: World, x: number, top: number, h: number, reach: number, colo
 // --- an emote's prop ---------------------------------------------------------------
 
 /**
- * Clawd changes its skin (user, 2026-10-08: /cd into a MatSci folder, or
- * /clawd skin) with a puff when the body it shows changes, unless `isQuiet`:
+ * Clawd changes its skin with a puff when the body it shows changes, unless `isQuiet`:
  * as the band starts, Clawd has its skin without one. The same skin read
  * again from its file changes nothing.
  */
@@ -1842,8 +1831,7 @@ function drawWorn(w: World, c: Body, look: Skin, put: Put): void {
   }
   // A wiggly walk ripples: a wave runs from the back tentacle to the front one, and each
   // tip in turn lifts, reaches forward and slides back. Running, it ripples with longer
-  // strides (user, 2026-10-07: the leg animation also when it sprints; the tips trailed
-  // until then).
+  // strides.
   const crawl = look.isWiggly && !airborne && speed > 0.5 && legLen > 0
   const nLegs = look.legs.length
   const swing = nLegs > 1 ? 1 / nLegs : 0 // the share of a stride a tip is lifted
@@ -1866,7 +1854,7 @@ function drawWorn(w: World, c: Body, look: Skin, put: Put): void {
   const left = Math.round(c.x - sw / 2)
   // Running, the top leans forward; carrying a brick on its head, the body
   // stays upright, since its arms hang low and the lean would leave a notch
-  // at the front shoulder (user, 2026-10-07).
+  // at the front shoulder.
   const lean = !airborne && !c.carrying && speed >= RUN * 0.7 ? 1 : 0
   const at = (lx: number, row: number, color: number) =>
     put(c.facing === 1 ? left + lx : left + sw - 1 - lx, top + row, color)
@@ -1997,7 +1985,7 @@ function drawBody(w: World, c: Body, put: Put): void {
   const left = Math.round(c.x - s.w / 2)
   // Running, the top leans forward; carrying a brick on its head, the body
   // stays upright, since its arms hang low and the lean would leave a notch
-  // at the front shoulder (user, 2026-10-07).
+  // at the front shoulder.
   const lean = !airborne && !c.carrying && speed >= RUN * 0.7 ? 1 : 0
   const at = (lx: number, row: number, color: number) =>
     put(c.facing === 1 ? left + lx : left + s.w - 1 - lx, top + row, color)
@@ -2099,7 +2087,7 @@ function drawScroll(c: Body, left: number, width: number, from: number, rows: nu
  * the eyes (pixels 8-connected to an `o`, or all pixels when it has none), so
  * not on a tentacle or a mark beside the head. On the part's top row, or, on a
  * round head, as far down its back edge as the whole antenna needs to fit in
- * the band (user, 2026-10-08, after a sheet of placements on the real emotes).
+ * the band.
  * `restTop` is the look's top row with Clawd on the ground, so the mount does
  * not slide during a hop. Local x from the back, and the row in the look.
  */
@@ -2140,8 +2128,7 @@ function antennaTip(top: number): number {
 /**
  * The antenna Clawd wears while Remote Control is on: a gray stalk from the
  * head pixel at screen column x, whose top is row `top`, leaning back a pixel
- * per row, with a green tip that blinks (user, 2026-10-08: gray, a coloured tip,
- * "at an angle, not that static straight up"). A cell shows two colours, so the
+ * per row, with a green tip that blinks. A cell shows two colours, so the
  * tip sits alone in the lower half of a cell: the stalk is two pixels high, or
  * three where the head's top row is the lower half of a cell. The tip needs the
  * band's second row of headroom, so the band stays 5 rows high while the
@@ -2315,12 +2302,13 @@ const DIGITS = [
  * The preview of an emote: a PNG of the band in every pose of PREVIEW_POSES,
  * then PREVIEW_PROP_POSES if it has a prop. An emote without a body shows on
  * `skin`, the skin Clawd wears now, and then the same lines again on Clawd's
- * own body (user, 2026-10-08), since it plays on whatever body Clawd has;
- * without a skin, once on Clawd's own body.
+ * own body, since it plays on whatever body Clawd has;
+ * without a skin, once on Clawd's own body. With `isSkinOnly` Clawd has no
+ * body of its own, so it shows on the skin only.
  */
-export function emotePreview(look: Emote, skin: Skin | null = null): Uint8Array {
+export function emotePreview(look: Emote, skin: Skin | null = null, isSkinOnly = false): Uint8Array {
   const poses = look.prop ? [...POSES, ...PROP_POSES] : POSES
-  const bodies = !look.body && skin ? [skin, null] : [skin]
+  const bodies = !look.body && skin && !isSkinOnly ? [skin, null] : [skin]
   // Each body starts on a line of its own.
   const lines = (body: Skin | null) => {
     const panels: (Panel | null)[] = poses.map(([, set]) => ({ skin: body, look, set }))
@@ -2339,10 +2327,10 @@ export function skinPreview(skin: Skin): Uint8Array {
  * Drafts of an emote side by side: a PNG with one line per draft, in the poses
  * of SHEET_POSES, and the draft's number at the left of its line. With a skin
  * on, a draft without a body shows the same poses again on Clawd's own body,
- * to the right on its line.
+ * to the right on its line, unless `isSkinOnly`.
  */
-export function emoteSheet(looks: Emote[], skin: Skin | null = null): Uint8Array {
-  const isTwice = skin !== null && looks.some(look => !look.body)
+export function emoteSheet(looks: Emote[], skin: Skin | null = null, isSkinOnly = false): Uint8Array {
+  const isTwice = skin !== null && !isSkinOnly && looks.some(look => !look.body)
   const line = (look: Emote): (Panel | null)[] => [
     ...SHEET.map(([, set]) => ({ skin, look, set })),
     ...(isTwice ? SHEET.map(([, set]) => (look.body ? null : { skin: null, look, set })) : []),
@@ -2380,9 +2368,64 @@ function sheet(panels: (Panel | null)[], perLine: number, numbers: number): Uint
   const rows = TALL_ROWS
   const spans = panels.map(panel => (panel ? reach(panel) : null))
   const cols = Math.max(PREVIEW_COLS, ...spans.map(span => (span ? Math.ceil((span[1] - span[0]) / 2) + 1 : 0)))
+  const frames = panels.map((panel, k) => {
+    const span = spans[k]
+    if (!panel || !span) return null
+    const { skin, look, set } = panel
+    const w = createWorld(cols, rows, seeded(1))
+    w.queue = []
+    w.skin = skin
+    Object.assign(w, { x: Math.round(cols - (span[0] + span[1]) / 2), t: 5, blinkAt: 999 })
+    if (look) {
+      wear(w, w, look)
+      w.wornUntil = Infinity
+    }
+    set(w)
+    return frameCells(w)
+  })
+  return framesPng(frames, cols, rows, perLine, numbers)
+}
+
+// How an act's preview samples it: one frame every ACT_PREVIEW_EVERY_S while
+// it plays, at most ACT_PREVIEW_FRAMES, in a band ACT_PREVIEW_COLS wide.
+export const ACT_PREVIEW_EVERY_S = 0.5
+export const ACT_PREVIEW_FRAMES = 30
+export const ACT_PREVIEW_COLS = 40
+
+/**
+ * The preview of an act: a PNG with one line per frame, the band every ACT_PREVIEW_EVERY_S
+ * from the act's start to its end, Clawd in `skin` and starting in the middle.
+ * A routine's emote and play steps must be linked. Answers the PNG and the
+ * number of frames; a frame k (from 1) is (k - 1) * ACT_PREVIEW_EVERY_S s in.
+ */
+export function actPreview(what: Playable, skin: Skin | null = null): { png: Uint8Array; frames: number } {
+  const cols = ACT_PREVIEW_COLS
+  const w = createWorld(cols, TALL_ROWS, seeded(1))
+  w.queue = []
+  w.skin = skin
+  Object.assign(w, { x: cols, t: 5, lastEventAt: 5, blinkAt: 7 })
+  perform(w, what)
+  const every = Math.round(ACT_PREVIEW_EVERY_S / DT)
+  const frames: string[] = []
+  for (let i = 0; frames.length < ACT_PREVIEW_FRAMES; i++) {
+    if (i % every === 0) frames.push(frameCells(w))
+    step(w)
+    // It ends with its last step, even while a look it put on stays.
+    if (w.act === null && w.queue.length === 0) {
+      if (frames.length < ACT_PREVIEW_FRAMES) frames.push(frameCells(w))
+      break
+    }
+  }
+  return { png: framesPng(frames, cols, TALL_ROWS, 1, 0), frames: frames.length }
+}
+
+// A PNG of frames as frameCells writes them, each `cols` x `rows` cells,
+// perLine to a line; a null frame stays empty. A margin of `numbers` pixels
+// gets each line's number, 1 to 9.
+function framesPng(frames: (string | null)[], cols: number, rows: number, perLine: number, numbers: number): Uint8Array {
   const panelW = cols * CELL_W
   const panelH = rows * CELL_H
-  const lines = Math.ceil(panels.length / perLine)
+  const lines = Math.ceil(frames.length / perLine)
   const width = numbers + perLine * (panelW + GAP) + GAP
   const height = lines * (panelH + GAP) + GAP
   const palette = new Map<number, number>()
@@ -2401,20 +2444,9 @@ function sheet(panels: (Panel | null)[], perLine: number, numbers: number): Uint
     for (let yy = y; yy < y + h; yy++) image.fill(i, yy * width + x, yy * width + x + w)
   }
   const masks = new Map(QUAD.map((cp, mask) => [cp, mask]))
-  panels.forEach((panel, k) => {
-    const span = spans[k]
-    if (!panel || !span) return
-    const { skin, look, set } = panel
-    const w = createWorld(cols, rows, seeded(1))
-    w.queue = []
-    w.skin = skin
-    Object.assign(w, { x: Math.round(cols - (span[0] + span[1]) / 2), t: 5, blinkAt: 999 })
-    if (look) {
-      wear(w, w, look)
-      w.wornUntil = Infinity
-    }
-    set(w)
-    const bytes = (Uint8Array as unknown as { fromBase64(s: string): Uint8Array }).fromBase64(frameCells(w))
+  frames.forEach((frame, k) => {
+    if (frame === null) return
+    const bytes = (Uint8Array as unknown as { fromBase64(s: string): Uint8Array }).fromBase64(frame)
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
     const ox = numbers + GAP + (k % perLine) * (panelW + GAP)
     const oy = GAP + Math.floor(k / perLine) * (panelH + GAP)

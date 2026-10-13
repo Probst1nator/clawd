@@ -3,6 +3,7 @@ import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import {
   ACTS,
+  ACT_PREVIEW_EVERY_S,
   BAND_ROWS,
   FLOOR_TEXT,
   MAX_DELAY_S,
@@ -17,6 +18,7 @@ import {
   SHEET_POSES,
   SLEEP_AFTER_S,
   TICK_MS,
+  actPreview,
   bandRows,
   bodyOf,
   callActs,
@@ -49,64 +51,72 @@ import {
   spawnMini,
   step,
 } from './clawd-sim'
-import type { ActKind, Call, Emote, Playable, Routine, Skin, World } from './clawd-sim'
-import { ALIASES, COMMANDS, EMOTE_COMMANDS, LIST_KINDS, MAX_REPEAT, SKIN_COMMANDS, isClawdDraft, marksFor, menuFor, menuLayout, namesFit, orderOf, writeOut } from './clawd-words'
-import type { ListKind, Menu, Names } from './clawd-words'
+import type { ActKind, Call, Emote, Playable, Routine, Skin, Step, World } from './clawd-sim'
+import { contextParts, contextRows } from './clawd-context'
+import { ACT_COMMANDS, ALIASES, COMMANDS, EMOTE_COMMANDS, LIST_KINDS, MAX_REPEAT, SKIN_COMMANDS, isClawdDraft, marksFor, menuFor, menuLayout, namesFit, orderOf, writeOut } from './clawd-words'
+import type { ListKind, MadeKind, Menu, Names } from './clawd-words'
 import { UML_LEGEND, UML_WIDTH, clawdUml, umlKinds } from './clawd-uml'
 import type { UmlKind } from './clawd-uml'
 
 // Clawd, the logo, runs in the band above the prompt: one full-width Raster
 // that a timer repaints with $.ui.blit. Session events steer it (the
-// behaviours are in clawd-sim.ts). User decisions 2026-10-03: logo-style
+// behaviours are in clawd-sim.ts). Logo-style
 // quadrant blocks, Clawd standing on a floor line at the band's bottom, two
 // sub-pixels of headroom above him (BAND_ROWS), and a row more (TALL_ROWS)
 // during big jumps; two more (ANTENNA_ROWS) while he wears the Remote Control
-// antenna on a tall look. With only 3 rows to spare he bounces in place.
-const CLAWD_MIN_ROWS = 3
-const CLAWD_MIN_COLUMNS = 20
+// antenna on a tall look. With only 3 rows to spare he bounces in place. The
+// band shows at any size the engine gives it, cut off where it is too small.
+const MENU_MIN_COLUMNS = 20
 const CLAWD_MAX_COLUMNS = 512 // the Raster limit
 // While /clawd is typed, a framed list hangs below Clawd's runway, whose floor
-// is the frame's top edge (user, 2026-10-05: "the way Clawd stands on top of a
-// box" with "the way the dropdown list is shown"). At most this many names show.
+// is the frame's top edge. At most this many names show.
 const MENU_ROWS = 7
-// The picker model picks what Clawd plays next (user, 2026-10-03; Haiku, Sonnet
+// The picker model picks what Clawd plays next (Haiku, Sonnet
 // from 2026-10-06, Haiku again from 2026-10-07; since 2026-10-08 Haiku unless
 // `/clawd autopick sonnet` or `opus` chose another): when a prompt is sent, when a turn ends, and
 // otherwise after a random 10 to 60 s. It reads the messages and tool calls
 // since its last pick, its rolling summary of the session, the situation
 // (time, idle time, what Clawd is doing) and the newest act a model made. It
-// may ask for a new act; Opus then writes the act's steps, kept in data/acts/
-// for every session and host. The top right of the band shows the pick and,
-// for a new act, its title.
-// Each running subagent gets a mini Clawd (user, 2026-10-03), which the
+// may ask for a new act, emote or skin; Opus then writes the act's steps or draws the look, kept in data/ for
+// every session and host. A skin it calls or has drawn is Clawd's body for the
+// rest of the session, below the person's own /clawd skin choice. The top
+// right of the band shows the pick and, for a new act, its title.
+// Each running subagent gets a mini Clawd, which the
 // picker addresses on its own: one pick is a list of calls, like parallel tool
 // calls, each naming a body (or all of them), an act and a delay of 0 to 5 s.
-// The picker is off until `/clawd autopick on` (user, 2026-10-07: a public
-// install makes no model calls by itself); the choice is kept in $.store, as
+// The picker is off until `/clawd autopick on`; the choice is kept in $.store, as
 // is the picker model (`pickModel`).
 const PICK_MODELS = ['haiku', 'sonnet', 'opus'] as const
 type PickModel = (typeof PICK_MODELS)[number]
 const DEFAULT_PICK_MODEL: PickModel = 'haiku'
 const MAKE_MODEL = 'opus'
+const NAME_MODEL = 'haiku' // names what a sentence after create asks for
 const PICK_MIN_S = 10
 const PICK_MAX_S = 60
-const NEW_PER_DAY = 5 // new acts and emotes in any 24 hours, over all sessions and hosts
+const NEW_PER_DAY = 5 // new acts, emotes and skins the picker may ask for in any 24 hours, over all sessions and hosts
 const FEED_MAX = 40 // lines kept for the next pick
 const DAY_MS = 24 * 3600_000
 const TRACE_MAX = 50 // picks kept per session in picks/
-// Emotes (user, 2026-10-04): looks Clawd takes for a while. emotes/ holds the
+// Emotes: looks Clawd takes for a while. emotes/ holds the
 // ones drawn by hand, data/emotes/ the ones a model drew. A model draws one in
 // a headless `claude -p` run, because $.model.complete takes no image: the run
 // may read the reference image and the preview of its draft and nothing else,
 // and the mod writes the files. A new emote starts as EMOTE_DRAFTS drafts in
-// one reply; the next round sees them side by side and picks one (user,
-// 2026-10-05), and each later round sees the preview of its draft.
+// one reply; the next round sees them side by side and picks one, and each later round sees the preview of its draft.
 const EMOTE_ROUNDS = 3
 const EMOTE_DRAFTS = 3
 const EMOTE_ROUND_MS = 300_000
 const IMAGE = /\.(png|jpe?g|gif|webp)$/i
-// `/clawd` words no emote or skin may be named
-const EMOTE_VERBS = [...Object.keys(COMMANDS), ...Object.keys(EMOTE_COMMANDS), ...Object.keys(SKIN_COMMANDS), ...Object.keys(LIST_KINDS), ...Object.keys(ALIASES), 'pick']
+// `/clawd` words no act, emote or skin may be named
+const RESERVED = [
+  ...Object.keys(COMMANDS),
+  ...Object.keys(ACT_COMMANDS),
+  ...Object.keys(EMOTE_COMMANDS),
+  ...Object.keys(SKIN_COMMANDS),
+  ...Object.keys(LIST_KINDS),
+  ...Object.keys(ALIASES),
+  'pick',
+]
 // What the built-in acts look like, for /clawd list and the menu while /clawd is typed.
 const ACT_WHAT: Partial<Record<ActKind, string>> = {
   ...PICKABLE,
@@ -123,6 +133,7 @@ const isTracing = atom({ plugin: 'clawd', key: 'isTracing' } as const, false)
 const isDebugging = atom({ plugin: 'clawd', key: 'isDebugging' } as const, false)
 const clawdMenu = atom({ plugin: 'clawd', key: 'clawdMenu' } as const, null)
 const clawdSkin = atom({ plugin: 'clawd', key: 'clawdSkin' } as const, null)
+const clawdPickedSkin = atom({ plugin: 'clawd', key: 'clawdPickedSkin' } as const, null)
 
 // Off in headless sessions and with CLAUDE_CLAWD_OFF=1. Tests set
 // CLAUDE_CLAWD_SEED so the band's random acts repeat.
@@ -132,9 +143,10 @@ const clawdSkin = atom({ plugin: 'clawd', key: 'clawdSkin' } as const, null)
 // does, else clawd/ in the Claude config folder, which a plugin update leaves
 // alone. `emoteDir` and `skinDir` hold the emotes and skins that ship with
 // the mod. `skin` is the skin Clawd wears now, as last read (`skinNow`):
-// `/clawd skin` chooses one for the session, else the plugin's clawd.json
-// names one (`fileSkin`; user, 2026-10-07: the MatSci octopus in
-// clawd-matsci), else `ROOT_SKINS` gives one for the project root (`root`).
+// `/clawd skin` chooses one for the session, else the autopicker picked one
+// for the session, else the plugin's clawd.json names one
+// (`fileSkin`), else
+// `ROOT_SKINS` gives one for the project root (`root`).
 const mod = {
   isOff: false,
   rand: Math.random,
@@ -163,7 +175,7 @@ type MadeEmote = Emote & Dated
 type MadeSkin = Skin & Dated
 
 /** Emotes and skins are drawn, changed, kept and removed the same way, each in its own folders. */
-type LookKind = 'emote' | 'skin'
+type LookKind = Exclude<MadeKind, 'act'>
 
 /** How a kind of look is read, written and drawn. */
 type Kit<T extends { name: string; title: string }> = {
@@ -173,18 +185,28 @@ type Kit<T extends { name: string; title: string }> = {
   preview: (look: T) => Uint8Array
   sheet: (looks: T[]) => Uint8Array
   check: (look: T) => string // why a newly drawn look is refused, or ''
+  what: (look: T) => string // one line on the look, for the overview a new drawing gets
 }
-// An emote is previewed on the skin Clawd wears now.
+// An emote is previewed on the skin Clawd wears now; with a clawd.json skin, on no other body.
 const EMOTE_KIT: Kit<Emote> = {
   kind: 'emote',
   parse: emoteFrom,
   json: emoteJson,
-  preview: look => emotePreview(look, mod.skin),
-  sheet: looks => emoteSheet(looks, mod.skin),
+  preview: look => emotePreview(look, mod.skin, mod.fileSkin !== ''),
+  sheet: looks => emoteSheet(looks, mod.skin, mod.fileSkin !== ''),
   check: look =>
     isClawdCopy(look) ? "its shapes are Clawd's own body; leave out shapes and the other body fields, so the look keeps the body Clawd has" : '',
+  what: emoteWhat,
 }
-const SKIN_KIT: Kit<Skin> = { kind: 'skin', parse: skinFrom, json: skinJson, preview: skinPreview, sheet: skinSheet, check: () => '' }
+const SKIN_KIT: Kit<Skin> = {
+  kind: 'skin',
+  parse: skinFrom,
+  json: skinJson,
+  preview: skinPreview,
+  sheet: skinSheet,
+  check: () => '',
+  what: look => look.title,
+}
 
 /** One call as the picker made it, for the label and `/clawd`. */
 type Called = { who: string; name: string; delay: number }
@@ -206,8 +228,9 @@ const brain = {
   dueAt: 0, // when the timer fires; 0 while none is set
   isPicking: false,
   again: null as string | null, // a trigger that came in during a pick
-  making: '', // the emote a model is drawing now
-  emoteError: '', // why the last emote a model drew failed
+  making: '', // the act a model writes or the look it draws now, from a /clawd command or a picker's look
+  makeError: '', // why the last act, emote or skin a model made failed
+  shown: new Map<string, string>(), // each part of the picker's request as /clawd debug last showed it
 }
 
 // Clawd's working state; a hot reload starts Clawd over.
@@ -243,13 +266,12 @@ function clawdTick($: EngineInterface): void {
   })
 }
 
-// While Remote Control is on, Clawd wears an antenna (user, 2026-10-08). No
+// While Remote Control is on, Clawd wears an antenna. No
 // hook event says when it goes on or off, but the engine keeps
 // CLAUDE_CODE_BRIDGE_SESSION_ID in its own environment while the session has a
 // Remote Control link (2.1.294), so the mod reads it every REMOTE_POLL_MS.
 // While it is on, the autopicker pauses and Clawd plays random acts; the stored
-// setting is left as it is and applies again when Remote Control ends (user,
-// 2026-10-08).
+// setting is left as it is and applies again when Remote Control ends.
 const REMOTE_POLL_MS = 1000
 
 async function pollRemote($: EngineInterface): Promise<void> {
@@ -271,7 +293,7 @@ const PICK_SYSTEM =
   'You direct Clawd, the Claude Code logo drawn as a small creature that runs around in a band ' +
   'above the prompt of a Claude Code session, and a mini Clawd for each subagent the session runs. ' +
   'The person sees Clawd while they work and sometimes talks to it or about it. When they give it a ' +
-  'name or compare it to something, they want to see it become that thing, which is what new acts and emotes are for. ' +
+  'name or compare it to something, they want to see it become that thing, which is what new acts, emotes and skins are for. ' +
   'You pick what they play next so it fits what is going on, and you keep a short summary of the ' +
   'session. Reply with one JSON object and nothing else.'
 
@@ -326,8 +348,7 @@ function ago(ms: number): string {
 /**
  * The acts models made, newest first, from data/acts/, with their emote and
  * play steps linked to `emotes` (read here when not given) and to each other.
- * An emote step may also name a skin, which Clawd then wears for a while
- * (user, 2026-10-07: octo_glide puffs into the MatSci octopus anywhere).
+ * An emote step may also name a skin, which Clawd then wears for a while.
  */
 async function loadMade($: EngineInterface, emotes?: Emote[]): Promise<MadeAct[]> {
   const dir = `${mod.dataDir}/acts`
@@ -350,13 +371,16 @@ async function loadMade($: EngineInterface, emotes?: Emote[]): Promise<MadeAct[]
       // half-written or broken; skip it
     }
   }
-  const looks = emotes ?? (await loadEmotes($))
-  const skins = await loadSkins($)
-  const find = (name: string): Playable | undefined => {
-    const skin = skins.find(x => x.name === name)
-    return made.find(r => r.name === name) ?? looks.find(x => x.name === name) ?? (skin && skinAsEmote(skin))
-  }
+  const find = finder(made, emotes ?? (await loadEmotes($)), await loadSkins($))
   return made.sort((a, b) => b.made.localeCompare(a.made)).map(r => linkRoutine(r, find))
+}
+
+/** What a name in an act's emote or play step stands for: a made act, an emote, or a skin worn for a while. */
+function finder(made: readonly Routine[], emotes: readonly Emote[], skins: readonly Skin[]): (name: string) => Playable | undefined {
+  return name => {
+    const skin = skins.find(x => x.name === name)
+    return made.find(r => r.name === name) ?? emotes.find(x => x.name === name) ?? (skin && skinAsEmote(skin))
+  }
 }
 
 /**
@@ -426,16 +450,20 @@ async function fileSkinOf($: EngineInterface, root: string): Promise<string> {
 }
 
 // Without a clawd.json skin, a session whose project root has `part` in its
-// path, in any case, wears `skin` (user, 2026-10-08: the MatSci octopus in any
-// MatSci folder). The root moves with /cd and worktree moves but not with a
+// path, in any case, wears `skin`. The root moves with /cd and worktree moves but not with a
 // shell cd, so an agent passing through a MatSci folder does not switch it.
 const ROOT_SKINS = [{ part: 'matsci', skin: 'matsci_octopus' }]
 const ROOT_POLL_MS = 1000
 
-/** The skin for now and where it comes from: /clawd skin's choice, clawd.json's, the project root's; '' for Clawd's own body. */
+/**
+ * The skin for now and where it comes from: /clawd skin's choice, the
+ * autopicker's, clawd.json's, the project root's; '' for Clawd's own body.
+ */
 async function skinNow($: EngineInterface): Promise<{ name: string; from: string }> {
   const chosen = await read($, clawdSkin)
   if (chosen !== null) return { name: chosen, from: 'chosen with /clawd skin for this session' }
+  const picked = await read($, clawdPickedSkin)
+  if (picked !== null) return { name: picked, from: 'picked by the autopicker for this session; /clawd skin auto goes back' }
   if (mod.fileSkin) return { name: mod.fileSkin, from: "named in the mod's clawd.json" }
   const path = mod.root.toLowerCase()
   const rule = ROOT_SKINS.find(r => path.includes(r.part))
@@ -547,7 +575,8 @@ type Form = 'become' | 'hold' | ''
 /**
  * The prompt of one drawing round of an emote or a skin. With `change`, an
  * existing look is changed: `isBefore` marks the first round, whose draft is
- * the look as it is now.
+ * the look as it is now. `others` lists the other looks of the kind, one line
+ * each, for the round that draws the drafts.
  */
 function emotePrompt(
   kind: LookKind,
@@ -562,6 +591,7 @@ function emotePrompt(
   isBefore = false,
   drafts: string[] = [],
   form: Form = '',
+  others: string[] = [],
 ): string {
   const poses = PREVIEW_POSES.map((p, i) => `${i + 1}. ${p}`).join('; ')
   const propPoses = PREVIEW_PROP_POSES.map((p, i) => `${PREVIEW_POSES.length + i + 1}. ${p}`).join('; ')
@@ -570,8 +600,8 @@ function emotePrompt(
   const hasBody = !isEmote || form !== 'hold'
   const mayHold = isEmote && form !== 'become'
   const propLines = isEmote ? [`A look with a prop gets one more line of ${PREVIEW_PROP_POSES.length} panels: ${propPoses}.`] : []
-  // A look that keeps the body is drawn on the skin and on Clawd's own body (emotePreview, emoteSheet).
-  const isTwice = isEmote && mayHold && mod.skin !== null
+  // A look that keeps the body is drawn on the skin and on Clawd's own body (emotePreview, emoteSheet), unless clawd.json names the skin.
+  const isTwice = isEmote && mayHold && mod.skin !== null && !mod.fileSkin
   const twiceLines = isTwice
     ? ["A look that keeps the body is shown on the skin and then, from a new line, in the same panels on Clawd's own body. It must work on both."]
     : []
@@ -616,6 +646,9 @@ function emotePrompt(
     'band is 4 rows (8 sub-pixels) high; with "tall": true it grows to 5 rows (10 sub-pixels) while Clawd',
     "wears the look. Clawd's own body is 12 x 4 sub-pixels with four legs of 1 below it.",
     '',
+    ...(isDrafting && others.length > 0
+      ? [`Clawd has these other ${isEmote ? 'emotes' : 'skins'}. Draw the new one so that it cannot be taken for any of them:`, ...others, '']
+      : []),
     ...(isDrafting
       ? [
           `Draw ${EMOTE_DRAFTS} drafts that differ in how they show it: ${differ}. The`,
@@ -722,7 +755,8 @@ type Change<T> = { look: T & Dated; text: string }
  * which it sees them side by side, picks one and fixes it, then a round in
  * which it sees the pick's preview and corrects it. With `start`, the first
  * draft is the look as it is now, and the model makes the change asked for.
- * The look, or why there is none.
+ * With `replace`, the look is drawn again from scratch and goes into that
+ * look's file. The look, or why there is none.
  */
 async function makeEmote<T extends { name: string; title: string }>(
   $: EngineInterface,
@@ -733,7 +767,10 @@ async function makeEmote<T extends { name: string; title: string }>(
   image: string,
   start?: Change<T>,
   form: Form = '',
+  replace?: T & Dated,
 ): Promise<(T & Dated) | string> {
+  // The drafts are told the other looks of the kind; the one drawn again is left out.
+  const others = start ? [] : (await loadLooks($, kit)).filter(l => l.name !== name).map(l => `- ${l.name}: ${oneLine(kit.what(l), 100)}`)
   let best: T | null = null
   let draft = start ? JSON.stringify(kit.json(start.look)) : ''
   let preview = start ? await previewLook($, kit, start.look, `${name}.before`) : ''
@@ -749,7 +786,7 @@ async function makeEmote<T extends { name: string; title: string }>(
     ]
     const r = await $.process.run(argv, {
       cwd: mod.dataDir,
-      stdin: emotePrompt(kit.kind, name, title, why, image, draft, preview, refused, start?.text, start !== undefined && round === 1, drafts, form),
+      stdin: emotePrompt(kit.kind, name, title, why, image, draft, preview, refused, start?.text, start !== undefined && round === 1, drafts, form, others),
       timeoutMs: EMOTE_ROUND_MS,
     })
     if (r.exitCode !== 0) return `claude exited ${r.exitCode} in round ${round}: ${oneLine(r.stderr || r.stdout, 200)}`
@@ -788,64 +825,115 @@ async function makeEmote<T extends { name: string; title: string }>(
   }
   if (!best) return `no usable draft in ${EMOTE_ROUNDS} rounds: ${refused}`
   const made = new Date(await $.clock.now()).toISOString()
-  // A changed look goes back where it was; the old one is kept in data/<kind>s/old/.
-  const file = start?.look.file ?? `${mod.dataDir}/${kit.kind}s/${name}.json`
-  if (start) await $.fs.write(await oldPath($, kit.kind, name), await $.fs.read(file))
+  // A changed or redrawn look goes back where it was; the old one is kept in data/<kind>s/old/.
+  const was = start?.look ?? replace
+  const file = was?.file ?? `${mod.dataDir}/${kit.kind}s/${name}.json`
+  if (was) await $.fs.write(await oldPath($, kit.kind, name), await $.fs.read(file))
   const changed = start ? { change: start.text } : {}
   await $.fs.write(file, `${JSON.stringify({ ...kit.json(best), made, project: mod.project, why, image, ...changed }, null, 2)}\n`)
   await previewLook($, kit, best)
   return { ...best, made, project: mod.project, why, image, file }
 }
 
-/** Where an emote's or a skin's old file goes when it is changed or deleted: data/<kind>s/old/<name>.<time>.json. */
-async function oldPath($: EngineInterface, kind: LookKind, name: string): Promise<string> {
+/** Where an act's, an emote's or a skin's old file goes when it is changed or deleted: data/<kind>s/old/<name>.<time>.json. */
+async function oldPath($: EngineInterface, kind: MadeKind, name: string): Promise<string> {
   const stamp = new Date(await $.clock.now()).toISOString().replace(/[:.]/g, '-')
   return `${mod.dataDir}/${kind}s/old/${name}.${stamp}.json`
 }
 
 /**
  * Starts drawing an emote in the background; it plays on `who` when done. It
- * runs from a timer, so it outlives the hook that asked for it.
+ * runs from a timer, so it outlives the hook that asked for it. With
+ * `replace`, that emote is drawn again from scratch.
  */
-function startEmote($: EngineInterface, name: string, title: string, why: string, image: string, who: string, start?: Change<Emote>, form: Form = ''): void {
+function startEmote(
+  $: EngineInterface,
+  name: string,
+  title: string,
+  why: string,
+  image: string,
+  who: string,
+  start?: Change<Emote>,
+  form: Form = '',
+  replace?: MadeEmote,
+): void {
   brain.making = name
   const w = clawd.world
-  if (w) callLabel(w, [], start ? ` · changing ${name}: "${start.text}"` : ` · new emote coming: "${title}"`)
-  $.clock.after(1, () => void drawEmote($, name, title, why, image, who, start, form))
+  const label = start ? ` · changing ${name}: "${start.text}"` : replace ? ` · drawing ${name} again` : ` · new emote coming: "${title}"`
+  if (w) callLabel(w, [], label)
+  $.clock.after(1, () => void drawEmote($, name, title, why, image, who, start, form, replace))
 }
 
-async function drawEmote($: EngineInterface, name: string, title: string, why: string, image: string, who: string, start?: Change<Emote>, form: Form = ''): Promise<void> {
-  const result = await drawn($, EMOTE_KIT, name, title, why, image, start, form)
+async function drawEmote(
+  $: EngineInterface,
+  name: string,
+  title: string,
+  why: string,
+  image: string,
+  who: string,
+  start?: Change<Emote>,
+  form: Form = '',
+  replace?: MadeEmote,
+): Promise<void> {
+  const result = await drawn($, EMOTE_KIT, name, title, why, image, start, form, replace)
   if (typeof result === 'string') return
   const w = clawd.world
   if (w) {
     callActs(w, [{ who, what: result, delay: 0 }])
-    callLabel(w, [{ who, name: `${name} (${start ? 'changed' : 'new emote'}) "${result.title}"` }])
+    callLabel(w, [{ who, name: `${name} (${start ? 'changed' : replace ? 'drawn again' : 'new emote'}) "${result.title}"` }])
   }
   brain.recent = [`${who}: ${name}`, ...brain.recent].slice(0, 8)
-  $.ui.toast(start ? `Clawd's emote ${name} is changed` : `Clawd has a new emote: ${name}`)
+  $.ui.toast(start ? `Clawd's emote ${name} is changed` : replace ? `Clawd's emote ${name} is drawn again` : `Clawd has a new emote: ${name}`)
 }
 
 /**
- * Starts drawing a skin in the background, as startEmote does an emote. A
- * new skin is worn for the rest of the session; a changed one comes on when
- * it is the skin worn now.
+ * Who wears a new skin for the rest of the session: the person, as with
+ * /clawd skin <skin>, or the autopicker, whose skin a /clawd skin choice outranks.
  */
-function startSkin($: EngineInterface, name: string, title: string, why: string, image: string, start?: Change<Skin>): void {
+type SkinSlot = 'chosen' | 'picked'
+
+/**
+ * Starts drawing a skin in the background, as startEmote does an emote. A
+ * new skin is worn for the rest of the session, in `slot`; a changed or
+ * redrawn one comes on when it is the skin worn now.
+ */
+function startSkin(
+  $: EngineInterface,
+  name: string,
+  title: string,
+  why: string,
+  image: string,
+  start?: Change<Skin>,
+  replace?: MadeSkin,
+  slot: SkinSlot = 'chosen',
+): void {
   brain.making = name
   const w = clawd.world
-  if (w) callLabel(w, [], start ? ` · changing the skin ${name}: "${start.text}"` : ` · new skin coming: "${title}"`)
-  $.clock.after(1, () => void drawSkin($, name, title, why, image, start))
+  const label = start ? ` · changing the skin ${name}: "${start.text}"` : replace ? ` · drawing the skin ${name} again` : ` · new skin coming: "${title}"`
+  if (w) callLabel(w, [], label)
+  $.clock.after(1, () => void drawSkin($, name, title, why, image, start, replace, slot))
 }
 
-async function drawSkin($: EngineInterface, name: string, title: string, why: string, image: string, start?: Change<Skin>): Promise<void> {
-  const result = await drawn($, SKIN_KIT, name, title, why, image, start)
+async function drawSkin(
+  $: EngineInterface,
+  name: string,
+  title: string,
+  why: string,
+  image: string,
+  start: Change<Skin> | undefined,
+  replace: MadeSkin | undefined,
+  slot: SkinSlot,
+): Promise<void> {
+  const result = await drawn($, SKIN_KIT, name, title, why, image, start, '', replace)
   if (typeof result === 'string') return
-  if (!start) await update($, clawdSkin, () => name)
+  if (!start && !replace && slot === 'chosen') await update($, clawdSkin, () => name)
+  if (!start && !replace && slot === 'picked') await update($, clawdPickedSkin, () => name)
   await applySkin($, true)
   const w = clawd.world
-  if (w) callLabel(w, [], ` · skin ${name} (${start ? 'changed' : 'new'}) "${result.title}"`)
-  $.ui.toast(start ? `Clawd's skin ${name} is changed` : `Clawd wears its new skin ${name} for this session`)
+  if (w) callLabel(w, [], ` · skin ${name} (${start ? 'changed' : replace ? 'drawn again' : 'new'}) "${result.title}"`)
+  $.ui.toast(
+    start ? `Clawd's skin ${name} is changed` : replace ? `Clawd's skin ${name} is drawn again` : `Clawd wears its new skin ${name} for this session`,
+  )
 }
 
 /** Draws the look; on failure, says so in the band, a toast and /clawd, and answers why. */
@@ -858,23 +946,28 @@ async function drawn<T extends { name: string; title: string }>(
   image: string,
   start?: Change<T>,
   form: Form = '',
+  replace?: T & Dated,
 ): Promise<(T & Dated) | string> {
   let result: (T & Dated) | string
   try {
-    result = await makeEmote($, kit, name, title, why, image, start, form)
+    result = await makeEmote($, kit, name, title, why, image, start, form, replace)
   } catch (err) {
     result = String(err)
   } finally {
     brain.making = ''
   }
   if (typeof result !== 'string') return result
-  const what = start ? `${kit.kind} change` : `new ${kit.kind}`
+  failed($, start ? `${kit.kind} change` : replace ? `${kit.kind} redraw` : `new ${kit.kind}`, name, result)
+  return result
+}
+
+/** Says in the band, a toast and /clawd that making an act, an emote or a skin failed, and why. */
+function failed($: EngineInterface, what: string, name: string, why: string): void {
   const w = clawd.world
   if (w) callLabel(w, [], ` · ${what} failed`)
-  $.ui.log(`clawd: ${what} ${name} failed: ${result}`, { to: 'debug' })
+  $.ui.log(`clawd: ${what} ${name} failed: ${why}`, { to: 'debug' })
   $.ui.toast(`Clawd's ${what} ${name} failed; /clawd says why`)
-  brain.emoteError = `${name}: ${result}`
-  return result
+  brain.makeError = `${name}: ${why}`
 }
 
 /** With `/clawd trace`, keeps the pick in data/picks/<session id>.jsonl, the last TRACE_MAX. */
@@ -896,16 +989,18 @@ async function tracePick($: EngineInterface, t: Trace): Promise<void> {
 }
 
 /**
- * With `/clawd debug` (user, 2026-10-07), shows the pick in the transcript, in
- * three rows the model never sees: the trigger, the model and its tokens; the
- * whole reply; what came of it. A row shows no line breaks (it draws a glyph
- * for each; tested live 2026-10-07), so the reply's whitespace is collapsed.
- * `$.model.complete` returns the reply's text only, so the model's thinking
- * cannot be shown.
+ * With `/clawd debug`, shows the pick in the transcript, in
+ * rows the model never sees: the trigger, the model and its tokens; the request
+ * it was sent, one row per line, its parts left out while they are as last
+ * shown (clawd-context.ts); the whole reply; what came of it.
+ * A row shows no line breaks (it draws a glyph for each; tested live
+ * 2026-10-07), so the reply's whitespace is collapsed. `$.model.complete`
+ * returns the reply's text only, so the model's thinking cannot be shown.
  */
 async function debugPick($: EngineInterface, t: Trace, model: string, tokens: string): Promise<void> {
   if (!(await read($, isDebugging))) return
   $.ui.log(`Clawd debug · autopick, ${t.trigger} · ${model}${tokens}`)
+  for (const row of contextRows(contextParts(t.system, t.prompt), brain.shown)) $.ui.log(row)
   $.ui.log(`reply: ${t.reply.replace(/\s+/g, ' ').trim() || '(none)'}`)
   $.ui.log(`→ ${t.outcome}`)
 }
@@ -934,7 +1029,22 @@ function emoteWhat(e: Emote): string {
   return `Clawd keeps the body it has, with ${parts.filter(Boolean).join(' and ')}: ${e.title}`
 }
 
-function pickPrompt(w: World, trigger: string, made: MadeAct[], emotes: MadeEmote[], madeToday: number, now: number, time: string): string {
+/**
+ * The picker's prompt. With `mayWear` (no /clawd skin choice this session) it
+ * lists the skins as calls and may ask for a new one; both are worn for the
+ * rest of the session.
+ */
+function pickPrompt(
+  w: World,
+  trigger: string,
+  made: MadeAct[],
+  emotes: MadeEmote[],
+  skins: MadeSkin[],
+  mayWear: boolean,
+  madeToday: number,
+  now: number,
+  time: string,
+): string {
   const lines = brain.feed.map(l => l.text)
   const first = brain.feed[0]
   if (first && first.n > brain.seen + 1) lines.unshift(`(${first.n - brain.seen - 1} earlier lines dropped)`)
@@ -942,6 +1052,7 @@ function pickPrompt(w: World, trigger: string, made: MadeAct[], emotes: MadeEmot
   const doing = (a: World['act']) => (a ? (a.routine ?? a.kind) : 'between acts')
   const minis = w.minis.filter(m => !m.isLeaving)
   const canMake = madeToday < NEW_PER_DAY
+  const wearable = mayWear ? skins.filter(x => x.name !== mod.skin?.name) : []
   const body = mod.skin ? `wears the skin ${mod.skin.name} ("${oneLine(mod.skin.title, 60)}") this session` : 'in its own body'
   return [
     `<session_summary>${brain.summary || '(nothing yet)'}</session_summary>`,
@@ -973,6 +1084,7 @@ function pickPrompt(w: World, trigger: string, made: MadeAct[], emotes: MadeEmot
     ...Object.entries(PICKABLE).map(([name, what]) => `${name}: ${what}`),
     ...made.map(r => `${r.name}: ${r.title}`),
     ...emotes.map(e => `${e.name}: an emote, clawd only, ${e.dur} s: ${emoteWhat(e)}`),
+    ...wearable.map(x => `${x.name}: a skin, clawd only, for the rest of the session: Clawd's body becomes ${x.title}`),
     '</acts>',
     '',
     'Return {"summary": "...", "calls": [{"who": "clawd", "play": "...", "delay": 0}], "why": "...", "new": null}.',
@@ -987,6 +1099,7 @@ function pickPrompt(w: World, trigger: string, made: MadeAct[], emotes: MadeEmot
     '  a reaction to a session event, which it waits for. Leave out entities that have no reason to',
     '  react. Vary the acts: avoid your recent calls unless one clearly fits best. Quiet moments suit',
     '  calm acts.',
+    ...(wearable.length > 0 ? ['  A skin stays on for the rest of the session: call one only when the person asks Clawd to stay that.'] : []),
     '- why: a few words.',
     // Tuned with replays through Haiku (2026-10-03): the earlier "null, unless no
     // act fits" wording answered "hi snowman" with a wave, 0 of 18 nicknames.
@@ -999,22 +1112,41 @@ function pickPrompt(w: World, trigger: string, made: MadeAct[], emotes: MadeEmot
         '  "for": "<who plays it first>"}; otherwise new is null. Add "look": "become" when Clawd should\n' +
         '  look like that thing (a pirate, a teapot), or "look": "hold" when it should hold, use or show a\n' +
         '  thing (a guitar, a telescope, a cake), rather than do a trick: then it is drawn as a new emote.\n' +
+        (mayWear
+          ? '  Add "look": "skin" instead when they ask Clawd to stay that thing from now on ("be a cat from\n' +
+            '  now on", "stay a pirate for the rest of the day"): then it is drawn as a new skin, which Clawd\n' +
+            '  wears for the rest of the session.\n'
+          : '') +
         '  A thing to hold is drawn on whatever body Clawd has. Ask no new look for what its skin shows.\n' +
         '  Add "image": "<path>" when the person wrote the path of a local image of that thing. calls\n' +
         '  still name acts from <acts>: play the closest one while the new act is written.\n' +
-        `  ${madeToday} of at most ${NEW_PER_DAY} new acts were made in the last 24 hours.`
-      : `- new: null. The ${NEW_PER_DAY} new acts for the last 24 hours are made.`,
+        `  ${madeToday} of at most ${NEW_PER_DAY} new acts, emotes and skins were made in the last 24 hours.`
+      : `- new: null. The ${NEW_PER_DAY} new acts, emotes and skins for the last 24 hours are made.`,
   ].join('\n')
 }
 
-function makePrompt(name: string, title: string, why: string, made: Routine[], emotes: Emote[], skins: Skin[]): string {
+/** A made act to change, and the change asked for (/clawd act change). */
+type ActChange = { act: MadeAct; text: string }
+
+/** An act's steps as its file keeps them: the names of its emote and play steps, not what they were linked to. */
+function plainSteps(r: Routine): Step[] {
+  return r.steps.map(({ worn: _worn, inner: _inner, ...rest }) => rest)
+}
+
+function makePrompt(name: string, title: string, why: string, made: Routine[], emotes: Emote[], skins: Skin[], change?: ActChange): string {
   const names = (items: { name: string; title: string }[]) => items.map(x => `${x.name} ("${oneLine(x.title, 60)}")`).join(', ') || 'none yet'
   return [
-    'Write the steps for a new act.',
+    change ? 'Change the steps of an act.' : 'Write the steps for a new act.',
     `name: ${name}`,
     `title: ${title}`,
     `why it was asked for: ${why}`,
     `the session so far: ${brain.summary || '(no summary)'}`,
+    ...(change
+      ? [
+          `The act as it is now: ${JSON.stringify({ steps: plainSteps(change.act) })}`,
+          `The change asked for now: "${change.text}". Make that change and keep what it does not touch.`,
+        ]
+      : []),
     '',
     "Clawd's own body is 6 cells wide and stands on a floor line; above its head is one row of room",
     '(two when it jumps). A skin may make it wider or taller. A mini Clawd, half its size, may play',
@@ -1055,12 +1187,27 @@ function makePrompt(name: string, title: string, why: string, made: Routine[], e
   ].join('\n')
 }
 
-/** Opus writes the steps of a new act; the act, or why there is none. */
-async function makeAct($: EngineInterface, name: string, title: string, why: string, made: Routine[], emotes: Emote[], skins: Skin[]): Promise<MadeAct | string> {
+/**
+ * Opus writes the steps of a new act. With `change` it changes a made act's
+ * steps; with `replace` it writes that act again from scratch. A changed or
+ * rewritten act goes back into its file, the old file into data/acts/old/.
+ * The act, or why there is none.
+ */
+async function makeAct(
+  $: EngineInterface,
+  name: string,
+  title: string,
+  why: string,
+  made: Routine[],
+  emotes: Emote[],
+  skins: Skin[],
+  change?: ActChange,
+  replace?: MadeAct,
+): Promise<MadeAct | string> {
   const answer = await $.model.complete({
     model: MAKE_MODEL,
     system: MAKE_SYSTEM,
-    prompt: makePrompt(name, title, why, made, emotes, skins),
+    prompt: makePrompt(name, title, why, made.filter(r => r.name !== name), emotes, skins, change),
     maxTokens: 2000,
     effort: 'medium',
     timeoutMs: 120_000,
@@ -1069,8 +1216,45 @@ async function makeAct($: EngineInterface, name: string, title: string, why: str
   const routine = routineFrom({ name, title, steps: parseJson(answer.text)?.steps })
   if (typeof routine === 'string') return `${routine}; Opus wrote: ${oneLine(answer.text, 300)}`
   const act: MadeAct = { ...routine, made: new Date(await $.clock.now()).toISOString(), project: mod.project, why }
-  await $.fs.write(`${mod.dataDir}/acts/${name}.json`, `${JSON.stringify(act, null, 2)}\n`)
+  const file = `${mod.dataDir}/acts/${name}.json`
+  if (change || replace) await $.fs.write(await oldPath($, 'act', name), await $.fs.read(file))
+  await $.fs.write(file, `${JSON.stringify({ ...act, ...(change ? { change: change.text } : {}) }, null, 2)}\n`)
   return act
+}
+
+/**
+ * Starts writing an act in the background, as startEmote draws an emote; it
+ * plays on `who` when done. With `change` a made act is changed, with
+ * `replace` written again from scratch.
+ */
+function startAct($: EngineInterface, name: string, title: string, why: string, who: string, change?: ActChange, replace?: MadeAct): void {
+  brain.making = name
+  const w = clawd.world
+  const label = change ? ` · changing ${name}: "${change.text}"` : replace ? ` · writing ${name} again` : ` · new act coming: "${title}"`
+  if (w) callLabel(w, [], label)
+  $.clock.after(1, () => void writeAct($, name, title, why, who, change, replace))
+}
+
+async function writeAct($: EngineInterface, name: string, title: string, why: string, who: string, change?: ActChange, replace?: MadeAct): Promise<void> {
+  const emotes = await loadEmotes($)
+  const made = await loadMade($, emotes)
+  const skins = await loadSkins($)
+  let result: MadeAct | string
+  try {
+    result = await makeAct($, name, title, why, made, emotes, skins, change, replace)
+  } catch (err) {
+    result = String(err)
+  } finally {
+    brain.making = ''
+  }
+  if (typeof result === 'string') return failed($, change ? 'act change' : replace ? 'act rewrite' : 'new act', name, result)
+  const w = clawd.world
+  if (w) {
+    callActs(w, [{ who, what: linkRoutine(result, finder(made, emotes, skins)), delay: 0 }])
+    callLabel(w, [{ who, name: `${name} (${change ? 'changed' : replace ? 'written again' : 'new'}) "${result.title}"` }])
+  }
+  brain.recent = [`${who}: ${name}`, ...brain.recent].slice(0, 8)
+  $.ui.toast(change ? `Clawd's act ${name} is changed` : replace ? `Clawd's act ${name} is written again` : `Clawd has a new act: ${name}`)
 }
 
 const ASKED = 'asked with /clawd autopick now'
@@ -1116,11 +1300,14 @@ async function pickNext($: EngineInterface, trigger: string): Promise<void> {
 async function pick($: EngineInterface, w: World, trigger: string, now: number): Promise<void> {
   const emotes = await loadEmotes($)
   const made = await loadMade($, emotes)
-  const madeToday = [...made, ...emotes].filter(r => r.made && now - Date.parse(r.made) < DAY_MS).length
+  const skins = await loadSkins($)
+  // A skin the person chose with /clawd skin outranks the picker's, so the picker gets none then.
+  const mayWear = (await read($, clawdSkin)) === null
+  const madeToday = [...made, ...emotes, ...skins].filter(r => r.made && now - Date.parse(r.made) < DAY_MS).length
   const fedUpTo = brain.seq
   // What the person wrote in the lines this pick reads: an image path the picker names must be in there.
   const userWrote = brain.feed.filter(l => l.n <= fedUpTo && l.text.startsWith('user: ')).map(l => l.text).join('\n')
-  const prompt = pickPrompt(w, trigger, made, emotes, madeToday, now, await localTime($))
+  const prompt = pickPrompt(w, trigger, made, emotes, skins, mayWear, madeToday, now, await localTime($))
   const model = await autopickModel($)
   const answer = await $.model.complete({
     model,
@@ -1130,7 +1317,8 @@ async function pick($: EngineInterface, w: World, trigger: string, now: number):
     timeoutMs: 30_000,
   })
   const at = new Date(now).toISOString()
-  const tokens = ` · ${answer.usage.input_tokens} tokens in, ${answer.usage.output_tokens} out`
+  const u = answer.usage
+  const tokens = ` · ${u.input_tokens} tokens in, ${u.cache_read_input_tokens} cache read, ${u.cache_creation_input_tokens} cache write, ${u.output_tokens} out`
   const traced = async (reply: string, outcome: string) => {
     const t = { at, trigger, system: PICK_SYSTEM, prompt, reply, outcome }
     await debugPick($, t, model, tokens)
@@ -1148,15 +1336,31 @@ async function pick($: EngineInterface, w: World, trigger: string, now: number):
   const byName = new Map<string, Routine | Emote>([...emotes.map(e => [e.name, e] as const), ...made.map(r => [r.name, r] as const)])
   const actOf = (name: unknown): Playable | undefined =>
     typeof name !== 'string' ? undefined : Object.hasOwn(PICKABLE, name) ? (name as ActKind) : byName.get(name)
+  const skinOf = (name: unknown): MadeSkin | undefined => (mayWear ? skins.find(x => x.name === name) : undefined)
   const isWho = (who: string) => who === 'all' || bodyOf(w, who) !== undefined
+  // A skin the picker calls or has drawn is Clawd's body for the rest of the session.
+  const wear = async (skin: string) => {
+    await update($, clawdPickedSkin, () => skin)
+    await applySkin($, true)
+  }
 
   // The calls; a bare {"play"} is one call for Clawd.
   const raw = Array.isArray(parsed?.calls) ? parsed.calls : parsed?.play !== undefined ? [{ who: 'clawd', play: parsed.play }] : []
   const calls: Call[] = []
   const called: Called[] = []
+  let worn: MadeSkin | undefined
   for (const item of raw.slice(0, 12)) {
     const c = (typeof item === 'object' && item !== null ? item : {}) as Record<string, unknown>
     const who = typeof c.who === 'string' ? c.who : 'clawd'
+    const skin = skinOf(c.play)
+    if (skin) {
+      // A skin is Clawd's alone, as an emote is: a mini stays a Clawd.
+      if (who === 'clawd' || who === 'all') {
+        worn = skin
+        called.push({ who: 'clawd', name: skin.name, delay: 0 })
+      }
+      continue
+    }
     const what = actOf(c.play)
     if (!isWho(who) || what === undefined) continue
     const delay = typeof c.delay === 'number' && Number.isFinite(c.delay) ? Math.min(MAX_DELAY_S, Math.max(0, c.delay)) : 0
@@ -1167,43 +1371,55 @@ async function pick($: EngineInterface, w: World, trigger: string, now: number):
   // dropped above, and the ask still stands without any other call.
   const ask = parsed?.new as { name?: unknown; title?: unknown; for?: unknown; look?: unknown; image?: unknown } | null | undefined
   // "look": true, from before "hold" existed (2026-10-08), means "become".
-  const form: Form | null = ask?.look === true || ask?.look === 'become' ? 'become' : ask?.look === 'hold' ? 'hold' : null
+  const form: Form | 'skin' | null =
+    ask?.look === true || ask?.look === 'become' ? 'become' : ask?.look === 'hold' ? 'hold' : ask?.look === 'skin' ? 'skin' : null
+  const kind: MadeKind = form === 'skin' ? 'skin' : form ? 'emote' : 'act'
   const isAsking = !!ask && typeof ask.name === 'string' && typeof ask.title === 'string'
-  if (calls.length === 0 && !isAsking) {
+  if (called.length === 0 && !isAsking) {
     brain.last = { trigger, calls: [], why: `unusable reply: ${oneLine(answer.text, 80)}`, at: now }
     return traced(answer.text, 'unusable reply: no call names a known body and act')
   }
-  if (calls.length > 0) {
-    callActs(w, calls)
+  if (called.length > 0) {
+    if (calls.length > 0) callActs(w, calls)
+    if (worn) await wear(worn.name)
     callLabel(w, called)
     brain.recent = [...called.map(callText), ...brain.recent].slice(0, 8)
   }
   brain.last = { trigger, calls: called, why, at: now }
   const playing = `played ${called.map(callText).join(', ') || 'nothing'}`
 
-  // A new act, when asked for and allowed; it plays on `for` once written.
+  // A new act, emote or skin, when asked for and allowed; an act plays on `for` once written.
   if (!ask || typeof ask.name !== 'string' || typeof ask.title !== 'string') return traced(answer.text, `${playing}; no new act`)
-  if (madeToday >= NEW_PER_DAY) return traced(answer.text, `${playing}; new act ${ask.name} asked, but ${NEW_PER_DAY} were made today`)
+  if (madeToday >= NEW_PER_DAY) return traced(answer.text, `${playing}; new ${kind} ${ask.name} asked, but ${NEW_PER_DAY} were made today`)
   const name = ask.name.toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 30)
   const title = oneLine(ask.title, 80)
   const target = typeof ask.for === 'string' && isWho(ask.for) ? ask.for : 'clawd'
+  // Acts, emotes and skins share their names with each other and with the /clawd words.
+  if (RESERVED.includes(name)) return traced(answer.text, `${playing}; new ${kind} ${name} refused: the name is a /clawd word`)
   const existing = actOf(name)
   if (existing !== undefined) {
     // It asked for one that exists: play that.
     callActs(w, [{ who: target, what: existing, delay: 0 }])
     callLabel(w, [{ who: target, name }])
-    return traced(answer.text, `${playing}; new act ${name} exists, played that`)
+    return traced(answer.text, `${playing}; new ${kind} ${name} exists, played that`)
+  }
+  if (skins.some(x => x.name === name)) {
+    if (!mayWear) return traced(answer.text, `${playing}; new ${kind} ${name} exists as a skin, but the person chose a skin with /clawd skin`)
+    await wear(name)
+    return traced(answer.text, `${playing}; new ${kind} ${name} exists as a skin, worn for the session`)
   }
   if (form) {
     // A new look: drawn in the background, so the picks go on meanwhile.
-    if (EMOTE_VERBS.includes(name)) return traced(answer.text, `${playing}; new emote ${name} refused: the name is a /clawd word`)
-    if (brain.making) return traced(answer.text, `${playing}; new emote ${name} asked, but ${brain.making} is still being drawn`)
+    if (form === 'skin' && !mayWear) return traced(answer.text, `${playing}; new skin ${name} refused: the person chose a skin with /clawd skin`)
+    if (brain.making) return traced(answer.text, `${playing}; new ${kind} ${name} asked, but ${brain.making} is still being made`)
     const image = typeof ask.image === 'string' && userWrote.includes(ask.image) ? await imagePath($, ask.image) : ''
-    startEmote($, name, title, why, image, 'clawd', undefined, form)
-    return traced(answer.text, `${playing}; new emote ${name} (${form}) being drawn${image ? ` after ${image}` : ''}`)
+    if (form === 'skin') startSkin($, name, title, why, image, undefined, undefined, 'picked')
+    else startEmote($, name, title, why, image, 'clawd', undefined, form)
+    return traced(answer.text, `${playing}; new ${kind} ${name}${form === 'skin' ? '' : ` (${form})`} being drawn${image ? ` after ${image}` : ''}`)
   }
+  // An act /clawd act create or change is writing has no file yet; a second write would race it.
+  if (brain.making === name) return traced(answer.text, `${playing}; new act ${name} asked, but it is still being made`)
   callLabel(w, called, ` · new act coming: "${title}"`)
-  const skins = await loadSkins($)
   const result = await makeAct($, name, title, why, made, emotes, skins)
   if (typeof result === 'string') {
     callLabel(w, called, ' · new act failed')
@@ -1211,11 +1427,7 @@ async function pick($: EngineInterface, w: World, trigger: string, now: number):
     return traced(answer.text, `${playing}; new act ${name} failed: ${result}`)
   }
   // The file keeps the names; the act plays with its emote and play steps linked, an emote step to a skin too.
-  const find = (n: string): Playable | undefined => {
-    const skin = skins.find(x => x.name === n)
-    return byName.get(n) ?? (skin && skinAsEmote(skin))
-  }
-  callActs(w, [{ who: target, what: linkRoutine(result, find), delay: 0 }])
+  callActs(w, [{ who: target, what: linkRoutine(result, finder(made, emotes, skins)), delay: 0 }])
   callLabel(w, [{ who: target, name: `${name} (new) "${title}"` }])
   brain.recent = [`${target}: ${name}`, ...brain.recent].slice(0, 8)
   brain.last = { trigger, calls: [{ who: target, name, delay: 0 }], why, at: now, made: result }
@@ -1234,6 +1446,7 @@ async function loadNames($: EngineInterface): Promise<Names> {
     skins: Object.fromEntries(skins.map(x => [x.name, x.title])),
     made: Object.fromEntries(made.map(r => [r.name, r.title])),
     acts: Object.fromEntries(ACTS.map(a => [a, ACT_WHAT[a] ?? 'an act'])),
+    isSkinOnly: mod.fileSkin !== '',
   }
 }
 
@@ -1267,28 +1480,35 @@ const ARGS: Readonly<Record<string, string>> = {
   trace: ' [on|off]',
   debug: ' [on|off]',
 }
+// What follows each `/clawd act` command in /clawd help.
+const ACT_ARGS: Readonly<Record<string, string>> = {
+  create: ' <name> [what it does]',
+  change: ' <made act> [change]',
+  delete: ' <made act>',
+  preview: ' <act>',
+}
 // What follows each `/clawd emote` command in /clawd help.
 const EMOTE_ARGS: Readonly<Record<string, string>> = {
-  create: ' <name> [image] <looks>',
-  change: ' <emote> [image] <change>',
+  create: ' <name> [image] [looks]',
+  change: ' <emote> [image] [change]',
   delete: ' <emote>',
   preview: ' <emote>',
 }
 // What follows each `/clawd skin` command in /clawd help; auto and none take nothing.
 const SKIN_ARGS: Readonly<Record<string, string>> = {
-  create: ' <name> [image] <looks>',
-  change: ' <skin> [image] <change>',
+  create: ' <name> [image] [looks]',
+  change: ' <skin> [image] [change]',
   delete: ' <skin>',
   preview: ' <skin>',
 }
 // The first line of /clawd list <kind>.
 const KIND_INTRO: Record<ListKind, string> = {
-  acts: `Acts: moves Clawd or a mini plays once. /clawd act <act> [1-${MAX_REPEAT}], or /clawd <mini> <act>.`,
-  made: 'Made acts: acts a model wrote when the autopicker asked for one. They play like acts.',
+  acts: `Acts: moves Clawd or a mini plays once. /clawd act <act> [1-${MAX_REPEAT}], or /clawd <mini> <act>; /clawd act preview <act> draws one.`,
+  made: 'Made acts: acts a model wrote, asked for by the autopicker or /clawd act create. They play like acts; /clawd act change and delete alter and remove them.',
   emotes:
     'Emotes: looks Clawd takes for a while; it turns into a thing or holds one. /clawd emote <emote> plays one; /clawd emote create, change and delete make, alter and remove them.',
   skins:
-    "Skins: bodies Clawd wears all the time instead of its own; emotes and acts play on them. clawd.json or the project folder picks one, /clawd skin <skin> another for this session; /clawd skin create, change and delete make, alter and remove them.",
+    "Skins: bodies Clawd wears all the time instead of its own; emotes and acts play on them. clawd.json or the project folder picks one, the autopicker or /clawd skin <skin> another for this session; /clawd skin create, change and delete make, alter and remove them.",
   minis: 'Minis: small Clawds, one per running subagent; each leaves when its subagent ends. /clawd <mini> <act>.',
 }
 
@@ -1301,14 +1521,22 @@ async function clawdHelp($: EngineInterface): Promise<string> {
       if (name === 'skin') {
         return [
           [`/clawd skin <skin>`, 'Clawd wears this skin for the rest of the session'],
-          ...Object.entries(SKIN_COMMANDS).map(([verb, does]): [string, string] => [`/clawd skin ${verb}${SKIN_ARGS[verb] ?? ''}`, does]),
+          ...Object.entries(SKIN_COMMANDS)
+            .filter(([verb]) => !(verb === 'none' && names.isSkinOnly))
+            .map(([verb, does]): [string, string] => [`/clawd skin ${verb}${SKIN_ARGS[verb] ?? ''}`, does]),
+        ]
+      }
+      if (name === 'act') {
+        return [
+          [`/clawd act <act> [1-${MAX_REPEAT}]`, 'Clawd plays an act, up to 5 times in a row'],
+          ...Object.entries(ACT_COMMANDS).map(([verb, does]): [string, string] => [`/clawd act ${verb}${ACT_ARGS[verb] ?? ''}`, does]),
+          [`/clawd <mini> <act> [1-${MAX_REPEAT}]`, 'a mini plays an act, e.g. /clawd a1 wave'],
         ]
       }
       if (name !== 'emote') return [row]
       return [
         [`/clawd emote <emote>`, "Clawd takes an emote's look for a while"],
         ...Object.entries(EMOTE_COMMANDS).map(([verb, does]): [string, string] => [`/clawd emote ${verb}${EMOTE_ARGS[verb] ?? ''}`, does]),
-        [`/clawd <mini> <act> [1-${MAX_REPEAT}]`, 'a mini plays an act, e.g. /clawd a1 wave'],
       ]
     }),
   ]
@@ -1323,7 +1551,8 @@ async function clawdHelp($: EngineInterface): Promise<string> {
     '',
     'What can play:',
     '  act    a move Clawd or a mini plays once: jump, wave, chase, ... Made acts are acts a model',
-    '         wrote when the autopicker asked for one; they play the same way.',
+    '         wrote; they play the same way. /clawd act create, change and delete make, alter and',
+    '         remove made acts.',
     '  emote  a look Clawd itself takes for a while: it turns into a thing, such as a snowman, or holds',
     '         one, such as a pointer, and keeps moving. Clawd only. /clawd emote create, change and',
     '         delete make, alter and remove them.',
@@ -1331,7 +1560,10 @@ async function clawdHelp($: EngineInterface): Promise<string> {
     '         make one; while it is there, /clawd <its id> <act> tells it what to play (a1, a2, ...).',
     "What Clawd is: a skin is a body Clawd wears all the time instead of its own, such as the MatSci",
     "octopus in a MatSci folder. Acts and emotes play on it. The mod's clawd.json or the project folder",
-    'picks it; /clawd skin <skin> wears another for this session, /clawd skin auto goes back.',
+    'picks it; the autopicker or /clawd skin <skin> wears another for this session, /clawd skin auto',
+    'goes back. Your own /clawd skin choice wins over the autopicker\'s.',
+    'Acts, emotes and skins all take create, change, delete and preview, and the autopicker may ask for',
+    `new ones of each, ${NEW_PER_DAY} a day in all.`,
     'While Remote Control is on, Clawd wears a gray antenna with a green tip, on any look, and the autopicker pauses.',
     `Now there are ${n(names.acts)} acts, ${n(names.made)} made acts, ${n(names.emotes)} emotes, ${n(names.skins)} skins and ${n(names.minis)} minis; /clawd list <kind> names them.`,
     '',
@@ -1341,7 +1573,7 @@ async function clawdHelp($: EngineInterface): Promise<string> {
     'while only one fits (/clawd cel plays celebrate). While you type, a framed list above the prompt',
     'shows the names the word fits, and a space writes out a word that fits one name.',
     '',
-    '/clawd help uml draws how Clawd behaves and how a new act or emote is made and found, as UML.',
+    '/clawd help uml draws how Clawd behaves and how a new act, emote or skin is made and found, as UML.',
   ].join('\n')
 }
 
@@ -1382,11 +1614,11 @@ const UML_STYLE: Record<UmlKind, { color?: string; bold?: boolean }> = {
 async function clawdListOf($: EngineInterface, of: ListKind): Promise<string> {
   const rows = Object.entries((await loadNames($))[of])
   let intro = KIND_INTRO[of]
-  if (of === 'made' || of === 'emotes') {
+  if (of === 'made' || of === 'emotes' || of === 'skins') {
     const now = await $.clock.now()
-    const dated = [...(await loadMade($)), ...(await loadEmotes($))]
+    const dated = [...(await loadMade($)), ...(await loadEmotes($)), ...(await loadSkins($))]
     const madeToday = dated.filter(r => r.made && now - Date.parse(r.made) < DAY_MS).length
-    intro += ` Made in the last 24 h: ${madeToday} acts and emotes; the autopicker may ask for ${NEW_PER_DAY} a day.`
+    intro += ` Made in the last 24 h: ${madeToday} acts, emotes and skins; the autopicker may ask for ${NEW_PER_DAY} a day.`
   }
   const width = Math.max(0, ...rows.map(([name]) => name.length))
   return [intro, ...(rows.length > 0 ? rows.map(([name, what]) => `  ${name.padEnd(width)}  ${what}`) : ['  none now'])].join('\n')
@@ -1430,16 +1662,88 @@ async function clawdStatus($: EngineInterface): Promise<string> {
       : 'No autopick yet.',
     `${next} Picker model: ${await autopickModel($)}. Session summary: ${brain.summary || '(none yet)'}`,
     await skinLine($),
-    ...(brain.making ? [`Drawing ${brain.making} now.`] : []),
-    ...(brain.emoteError ? [`The last drawing failed: ${brain.emoteError}`] : []),
-    '/clawd help explains acts, emotes and minis and lists the commands.',
+    ...(brain.making ? [`Making ${brain.making} now.`] : []),
+    ...(brain.makeError ? [`The last act, emote or skin a model made failed: ${brain.makeError}`] : []),
+    '/clawd help explains acts, emotes, skins and minis and lists the commands.',
   ].join('\n')
+}
+
+/** The names a new act, emote or skin may not take: they share one set of names with each other and with the /clawd words. */
+async function takenNames($: EngineInterface): Promise<string[]> {
+  return [
+    ...ACTS,
+    ...Object.keys(PICKABLE),
+    ...RESERVED,
+    ...(await loadMade($)).map(r => r.name),
+    ...(await loadEmotes($)).map(x => x.name),
+    ...(await loadSkins($)).map(x => x.name),
+  ]
+}
+
+/**
+ * A typed name as a file name: capitals and hyphens become snake_case
+ * (ClaudeWithGlasses and claude-with-glasses give claude_with_glasses); ''
+ * when no name of 2 to 31 characters starting with a letter is left.
+ */
+function snakeName(word: string): string {
+  const name = word
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .slice(0, 31)
+    .replace(/^_+|_+$/g, '')
+  return /^[a-z][a-z0-9_]{1,30}$/.test(name) ? name : ''
+}
+
+const NAME_SYSTEM =
+  'You name a new act, emote or skin for Clawd, the Claude Code logo drawn as a small creature above the prompt of a Claude Code session. Reply with one JSON object and nothing else.'
+const MADE_WHAT: Record<MadeKind, string> = {
+  act: 'An act is a move Clawd plays',
+  emote: 'An emote is a look Clawd takes for a while',
+  skin: 'A skin is a body Clawd wears for the rest of the session',
+}
+
+/** Words after create that read as a sentence: three or more, none with an underscore. */
+const isSentence = (words: readonly string[]): boolean => words.length >= 3 && words.every(w => !w.includes('_'))
+
+/**
+ * Haiku names what a sentence after create asks for, and keeps the words that
+ * describe it as the title. Undefined when it gives no usable name; the first word is the name then.
+ */
+async function nameFor($: EngineInterface, kind: MadeKind, words: readonly string[], taken: readonly string[]): Promise<{ name: string; title: string } | undefined> {
+  const said = words.join(' ')
+  const prompt = [
+    `The person typed /clawd ${kind} create, then these words: ${said}`,
+    `${MADE_WHAT[kind]}. Return {"name": "...", "title": "..."}.`,
+    '- name: lower case, words joined by _, 2 to 30 characters, saying what it is (claude_with_glasses).',
+    '  When the first word names it and the rest describes it ("frog a green frog with big eyes"), the',
+    '  name is that word.',
+    '- title: those words as they are, without the first one when it is the name, under 80 characters.',
+    `Names already taken, which the new one may not have: ${taken.join(', ')}.`,
+  ].join('\n')
+  try {
+    const answer = await $.model.complete({ model: NAME_MODEL, system: NAME_SYSTEM, prompt, maxTokens: 200, timeoutMs: 30_000 })
+    if (!answer.isAnswered) return undefined
+    const r = parseJson(answer.text)
+    const name = typeof r?.name === 'string' ? snakeName(r.name) : ''
+    if (!name) return undefined
+    return { name, title: (typeof r?.title === 'string' ? oneLine(r.title, 80) : '') || oneLine(said, 80) }
+  } catch {
+    return undefined
+  }
+}
+
+/** What /clawd <kind> change asks for: the words, without one pair of quotes around them all, which are the user's. */
+function changeText(words: readonly string[], n: number): string {
+  const said = oneLine(words.join(' '), n)
+  return /^(["']).*\1$/.test(said) && said.length > 1 ? said.slice(1, -1).trim() : said
 }
 
 /**
  * `/clawd emote|skin preview|create|change|delete ...`; undefined for any
  * other verb. `begin` starts a drawing. orderOf has checked that change and
- * delete name a look in full.
+ * delete name a look in full. A change with no words and no image draws the
+ * look again from scratch.
  */
 async function lookCommand<T extends { name: string; title: string }>(
   $: EngineInterface,
@@ -1447,7 +1751,7 @@ async function lookCommand<T extends { name: string; title: string }>(
   verb: string,
   rest: readonly string[],
   names: Names,
-  begin: (name: string, title: string, why: string, image: string, start?: Change<T>) => void,
+  begin: (name: string, title: string, why: string, image: string, start?: Change<T>, replace?: T & Dated) => void,
 ): Promise<string | undefined> {
   const kind = kit.kind
   const looks = await loadLooks($, kit)
@@ -1459,38 +1763,39 @@ async function lookCommand<T extends { name: string; title: string }>(
     if (!look) return `Clawd: no ${kind} ${arg ?? ''}. ${kind === 'emote' ? 'Emotes' : 'Skins'}: ${looks.map(x => x.name).join(', ') || 'none'}.`
     const path = await previewLook($, kit, look)
     const poses = 'prop' in look && look.prop ? [...PREVIEW_POSES, ...PREVIEW_PROP_POSES] : PREVIEW_POSES
-    const twice = 'body' in look && !look.body && mod.skin ? ` They show it on the skin ${mod.skin.name}, then on Clawd's own body.` : ''
+    const twice = 'body' in look && !look.body && mod.skin && !mod.fileSkin ? ` They show it on the skin ${mod.skin.name}, then on Clawd's own body.` : ''
     return `Clawd: ${look.name} in ${poses.length} poses, ${PREVIEW_PER_LINE} per line, is in ${path}. The poses: ${poses.join(', ')}.${twice}`
   }
   if (verb === 'create') {
-    // `/clawd emote create <name> [image path] <what it looks like>`, and the same
-    // for a skin; a draw is a paid model run, so it needs an image or a description.
-    const [name = '', ...more] = rest
+    // `/clawd emote create <name> [image path] [what it looks like]`, and the same
+    // for a skin. The name alone is enough: the model draws
+    // from it in words. An image path in its place gives the name from its file,
+    // and a sentence gets its name from Haiku (nameFor).
+    const usage = `Usage: /clawd ${kind} create <name> [image path] [what it looks like], e.g. /clawd ${kind} create frog_with_big_eyes or /clawd ${kind} create frog a green frog with big eyes`
+    const [typed = '', ...after] = rest
+    if (!typed) return usage
+    if (brain.making) return `Clawd: ${brain.making} is still being made; one at a time.`
+    const isImageFirst = IMAGE.test(typed)
+    const more = isImageFirst ? [typed, ...after] : after
     const at = more.findIndex(word => IMAGE.test(word))
     const image = at >= 0 ? await imagePath($, more[at] ?? '') : ''
     if (at >= 0 && !image) return `Clawd: ${more[at]} is no image file.`
-    const looksLike = oneLine(more.filter((_, i) => i !== at).join(' '), 80)
-    const title = looksLike || name.replace(/_/g, ' ')
-    if (!/^[a-z][a-z0-9_]{1,30}$/.test(name) || (!looksLike && !image)) {
-      return `Usage: /clawd ${kind} create <snake_case_name> [image path] <what it looks like>, e.g. /clawd ${kind} create frog a green frog with big eyes`
-    }
-    // Emotes and skins share their names, so an act's emote step names one of them.
-    const taken = [
-      ...ACTS,
-      ...Object.keys(PICKABLE),
-      ...EMOTE_VERBS,
-      ...(await loadMade($)).map(r => r.name),
-      ...(await loadEmotes($)).map(x => x.name),
-      ...(await loadSkins($)).map(x => x.name),
-    ]
+    const said = more.filter((_, i) => i !== at)
+    const words = isImageFirst ? said : [typed, ...said]
+    const taken = await takenNames($)
+    const named = isSentence(words) ? await nameFor($, kind, words, taken) : undefined
+    const first = snakeName(isImageFirst ? (typed.split('/').pop() ?? '').replace(IMAGE, '') : typed)
+    const name = named?.name ?? first
+    const title = named?.title ?? (oneLine(said.join(' '), 80) || name.replace(/_/g, ' '))
+    if (!name) return usage
     if (taken.includes(name)) return `Clawd: ${name} is taken; pick another name.`
-    if (brain.making) return `Clawd: ${brain.making} is still being drawn; one at a time.`
     begin(name, title, `asked for with /clawd ${kind} create`, image)
-    return `Clawd: a model draws ${name}${image ? ` after ${image}` : ''}, in up to ${EMOTE_ROUNDS} rounds of a minute or two; ${whenDone}.`
+    const by = named && named.name !== first ? ` (named by ${NAME_MODEL})` : ''
+    return `Clawd: a model draws ${name}${by}${image ? ` after ${image}` : ''}, in up to ${EMOTE_ROUNDS} rounds of a minute or two; ${whenDone}.`
   }
   const look = looks.find(x => x.name === arg)
   if ((verb === 'change' || verb === 'delete') && !look) return `Clawd: ${arg ?? ''} is gone.`
-  if (look && brain.making === look.name) return `Clawd: ${look.name} is being drawn right now; wait until it is done.`
+  if (look && brain.making === look.name) return `Clawd: ${look.name} is being made right now; wait until it is done.`
   if (verb === 'delete' && look) {
     const to = await oldPath($, kind, look.name)
     await $.process.run(['mkdir', '-p', `${mod.dataDir}/${kind}s/old`], { timeoutMs: 5000 })
@@ -1498,44 +1803,123 @@ async function lookCommand<T extends { name: string; title: string }>(
     if (r.exitCode !== 0) return `Clawd: ${look.name} could not be moved: ${oneLine(r.stderr, 200)}`
     const own = kind === 'emote' ? mod.emoteDir : mod.skinDir
     const tracked = look.file.startsWith(`${own}/`) ? ` It shipped with the mod in ${kind}s/: in a git checkout, commit the removal or git checkout it back.` : ''
-    if (kind === 'skin') await applySkin($, true)
+    if (kind === 'skin') {
+      if ((await read($, clawdPickedSkin)) === look.name) await update($, clawdPickedSkin, () => null)
+      await applySkin($, true)
+    }
     return `Clawd: ${look.name} is deleted. Its file is now ${to}; move it back to undo.${tracked}`
   }
   if (verb === 'change' && look) {
-    // `/clawd emote change <emote> [image path] <what to change>`; a paid model run like create.
+    // `/clawd emote change <emote> [image path] [what to change]`; a paid model run like create.
     const more = rest.slice(1)
     const at = more.findIndex(word => IMAGE.test(word))
     const image = at >= 0 ? await imagePath($, more[at] ?? '') : ''
     if (at >= 0 && !image) return `Clawd: ${more[at]} is no image file.`
-    // One pair of quotes around the whole request is the user's, not part of it.
-    const words = oneLine(more.filter((_, i) => i !== at).join(' '), 120)
-    const said = /^(["']).*\1$/.test(words) && words.length > 1 ? words.slice(1, -1).trim() : words
+    const said = changeText(more.filter((_, i) => i !== at), 120)
     const text = said || (image ? 'make it look like the new reference image' : '')
-    if (!text) return `Usage: /clawd ${kind} change ${look.name} [image path] <what to change>, e.g. /clawd ${kind} change ${look.name} make it blue`
-    if (brain.making) return `Clawd: ${brain.making} is still being drawn; one at a time.`
-    begin(look.name, look.title, look.why || `asked for with /clawd ${kind} change`, image || look.image, { look, text })
+    if (brain.making) return `Clawd: ${brain.making} is still being made; one at a time.`
+    const why = look.why || `asked for with /clawd ${kind} change`
     const after = kind === 'emote' ? whenDone : 'Clawd wears it when done if it is the skin worn now'
-    return `Clawd: a model changes ${look.name}: "${text}", in up to ${EMOTE_ROUNDS} rounds of a minute or two; ${after}. The old look goes to ${mod.dataDir}/${kind}s/old/.`
+    const old = `The old look goes to ${mod.dataDir}/${kind}s/old/ once the new one is saved.`
+    if (!text) {
+      // Nothing to change: the look is drawn again from scratch, from its title and reference
+      // image, as create draws a new one.
+      begin(look.name, look.title, why, look.image, undefined, look)
+      return `Clawd: a model draws ${look.name} again from scratch after "${oneLine(look.title, 80)}", in up to ${EMOTE_ROUNDS} rounds of a minute or two; ${after}. ${old}`
+    }
+    begin(look.name, look.title, why, image || look.image, { look, text })
+    return `Clawd: a model changes ${look.name}: "${text}", in up to ${EMOTE_ROUNDS} rounds of a minute or two; ${after}. ${old}`
   }
   return undefined
 }
 
 /**
+ * `/clawd act preview|create|change|delete ...`, as lookCommand does for
+ * emotes and skins. Opus
+ * writes an act from words, so create and change take no image. orderOf has
+ * checked that change and delete name a made act in full. A change with no
+ * words writes the act again from scratch, from its title and why.
+ */
+async function actCommand($: EngineInterface, verb: string, rest: readonly string[], names: Names): Promise<string> {
+  const made = await loadMade($)
+  const [arg] = rest
+  if (verb === 'preview') {
+    const fits = arg === undefined ? [] : namesFit(arg, ['act', 'made'], names)
+    const fit = fits.length === 1 ? fits[0] : undefined
+    const what: Playable | undefined = fit?.kind === 'made' ? made.find(r => r.name === fit.name) : fit?.kind === 'act' ? (fit.name as ActKind) : undefined
+    if (!fit || what === undefined) return `Clawd: no act ${arg ?? ''}. /clawd list acts and /clawd list made name them.`
+    const { png, frames } = actPreview(what, mod.skin)
+    const path = `${mod.dataDir}/acts/previews/${fit.name}.png`
+    await writeBytes($, path, png)
+    const skin = mod.skin ? ` Clawd wears the skin ${mod.skin.name}.` : ''
+    return `Clawd: ${fit.name} in ${frames} frames, the band every ${ACT_PREVIEW_EVERY_S} s from top to bottom, is in ${path}.${skin}`
+  }
+  if (verb === 'create') {
+    // `/clawd act create <name> [what it does]`; the name alone is enough, and a
+    // sentence gets its name from Haiku, as for a look.
+    const usage = 'Usage: /clawd act create <name> [what it does], e.g. /clawd act create cartwheel or /clawd act create cartwheel turns a cartwheel across the band'
+    const [typed = '', ...more] = rest
+    if (!typed) return usage
+    if (brain.making) return `Clawd: ${brain.making} is still being made; one at a time.`
+    const taken = await takenNames($)
+    const named = isSentence(rest) ? await nameFor($, 'act', rest, taken) : undefined
+    const first = snakeName(typed)
+    const name = named?.name ?? first
+    const does = named?.title ?? (oneLine(more.join(' '), 80) || name.replace(/_/g, ' '))
+    if (!name) return usage
+    if (taken.includes(name)) return `Clawd: ${name} is taken; pick another name.`
+    startAct($, name, does, 'asked for with /clawd act create', 'clawd')
+    const by = named && named.name !== first ? ` (named by ${NAME_MODEL})` : ''
+    return `Clawd: ${MAKE_MODEL} writes ${name}${by}, in a minute or two; it plays when done.`
+  }
+  const act = made.find(r => r.name === arg)
+  if (!act) return `Clawd: ${arg ?? ''} is gone.`
+  if (brain.making === act.name) return `Clawd: ${act.name} is being made right now; wait until it is done.`
+  if (verb === 'delete') {
+    const to = await oldPath($, 'act', act.name)
+    await $.process.run(['mkdir', '-p', `${mod.dataDir}/acts/old`], { timeoutMs: 5000 })
+    const r = await $.process.run(['mv', '--', `${mod.dataDir}/acts/${act.name}.json`, to], { timeoutMs: 5000 })
+    if (r.exitCode !== 0) return `Clawd: ${act.name} could not be moved: ${oneLine(r.stderr, 200)}`
+    return `Clawd: ${act.name} is deleted. Its file is now ${to}; move it back to undo.`
+  }
+  if (verb === 'change') {
+    // `/clawd act change <act> [what to change]`; a paid model run like create.
+    const text = changeText(rest.slice(1), 120)
+    if (brain.making) return `Clawd: ${brain.making} is still being made; one at a time.`
+    const why = act.why || 'asked for with /clawd act change'
+    const old = `The old act goes to ${mod.dataDir}/acts/old/ once the new one is saved.`
+    if (!text) {
+      startAct($, act.name, act.title, why, 'clawd', undefined, act)
+      return `Clawd: ${MAKE_MODEL} writes ${act.name} again from scratch after "${oneLine(act.title, 80)}", in a minute or two; it plays when done. ${old}`
+    }
+    startAct($, act.name, act.title, why, 'clawd', { act, text })
+    return `Clawd: ${MAKE_MODEL} changes ${act.name}: "${text}", in a minute or two; it plays when done. ${old}`
+  }
+  return 'Clawd: /clawd act takes an act, or create, change, delete or preview.'
+}
+
+/**
  * `/clawd skin` says which skin Clawd wears and why; `/clawd skin <skin>`
  * wears that one for the rest of the session, `none` Clawd's own body, and
- * `auto` what clawd.json or the project folder gives. The skin commands work
- * as the emote commands do.
+ * `auto` what clawd.json or the project folder gives. A mod whose clawd.json
+ * names a skin has no `none` (`Names.isSkinOnly`). The skin commands work as the
+ * emote commands do.
  */
 async function skinCommand($: EngineInterface, rest: readonly string[], names: Names): Promise<string> {
   const [first] = rest
-  const how = "/clawd skin <skin> wears another for this session, none Clawd's own body, auto what clawd.json or the project folder gives; /clawd list skins names them."
+  const how = mod.fileSkin
+    ? '/clawd skin <skin> wears another for this session, auto the one clawd.json names; /clawd list skins names them.'
+    : "/clawd skin <skin> wears another for this session, none Clawd's own body, auto what clawd.json or the project folder gives; /clawd list skins names them."
   if (first === undefined) return `${await skinLine($)} ${how}`
   if (first === 'auto' || first === 'none' || Object.hasOwn(names.skins, first)) {
     await update($, clawdSkin, () => (first === 'auto' ? null : first === 'none' ? '' : first))
+    // auto also drops the skin the autopicker chose; a choice of yours outranks it anyway.
+    if (first === 'auto') await update($, clawdPickedSkin, () => null)
     await applySkin($, true)
     return `Clawd: ${await skinLine($)}${first === 'auto' ? '' : ' /clawd skin auto goes back.'}`
   }
-  const begin = (name: string, title: string, why: string, image: string, start?: Change<Skin>) => startSkin($, name, title, why, image, start)
+  const begin = (name: string, title: string, why: string, image: string, start?: Change<Skin>, replace?: MadeSkin) =>
+    startSkin($, name, title, why, image, start, replace)
   return (await lookCommand($, SKIN_KIT, first, rest.slice(1), names, begin)) ?? `${await skinLine($)} ${how}`
 }
 
@@ -1555,7 +1939,7 @@ export const register: Register = on => {
     )
     await $.command.register({
       name: 'clawd',
-      description: 'Clawd above the prompt: help, act, emote, list, on, off, autopick; short names work',
+      description: 'Clawd above the prompt: help, act, emote, skin, list, on, off, autopick; short names work',
     })
     $.clock.every(TICK_MS, () => clawdTick($))
     await pollRemote($)
@@ -1691,8 +2075,7 @@ export const register: Register = on => {
       await $.store.set('isClawdOn', verb === 'on')
       return { text: `Clawd ${verb}.` }
     }
-    // Bare trace, debug and autopick switch their state (user, 2026-10-07:
-    // "it should just switch the current state"); on and off still set it.
+    // Bare trace, debug and autopick switch their state; on and off still set it.
     if (verb === 'trace') {
       const turn = arg === undefined ? undefined : ['on', 'off'].find(t => t === arg || (arg.length > 1 && t.startsWith(arg)))
       if (arg !== undefined && !turn) return { text: 'Clawd: /clawd trace takes on, off or nothing.' }
@@ -1709,7 +2092,9 @@ export const register: Register = on => {
       if (arg !== undefined && !turn) return { text: 'Clawd: /clawd debug takes on, off or nothing.' }
       const isOn = turn ? turn === 'on' : !(await read($, isDebugging))
       await update($, isDebugging, () => isOn)
-      // User, 2026-10-07: debug looked broken while autopick was off and no pick ran.
+      // Switched on, the next pick shows its whole request again.
+      if (isOn) brain.shown.clear()
+      // Debug looked broken while autopick was off and no pick ran.
       const offHint = !(await isAutopicking($))
         ? ' Autopick is off, so only /clawd autopick now picks; /clawd autopick lets it run by itself.'
         : mod.isRemote
@@ -1717,7 +2102,7 @@ export const register: Register = on => {
           : ''
       return {
         text: isOn
-          ? `Clawd: debug on. Each autopick's whole reply, its tokens and what came of it now show here, dim and not sent to the model. The model's thinking is not available to a mod.${offHint} /clawd debug turns it off.`
+          ? `Clawd: debug on. Each autopick's tokens, the request it sent, its whole reply and what came of it now show here, dim and not sent to the model. A part of the request that is as last shown is left out and named. The model's thinking is not available to a mod.${offHint} /clawd debug turns it off.`
           : 'Clawd: debug off.',
       }
     }
@@ -1728,7 +2113,7 @@ export const register: Register = on => {
         $.clock.after(1, () => void pickNext($, ASKED))
         return { text: 'Clawd: the autopicker chooses now; /clawd shows its pick.' }
       }
-      // A model word sets the picker model and leaves the switch as it is (user, 2026-10-08).
+      // A model word sets the picker model and leaves the switch as it is.
       const model = PICK_MODELS.find(m => m === turn)
       if (model) {
         await $.store.set('pickModel', model)
@@ -1759,8 +2144,11 @@ export const register: Register = on => {
       return { text: 'Clawd: the autopicker is off (remembered). Clawd plays random acts and makes no model calls. /clawd autopick turns it on.' }
     }
     if (verb === 'skin') return { text: await skinCommand($, order.rest, names) }
-    const begin = (name: string, title: string, why: string, image: string, start?: Change<Emote>) => startEmote($, name, title, why, image, 'clawd', start)
-    return { text: (await lookCommand($, EMOTE_KIT, verb, order.rest, names, begin)) ?? (await clawdStatus($)) }
+    if (verb === 'act') return { text: await actCommand($, arg ?? '', order.rest.slice(1), names) }
+    if (verb !== 'emote') return { text: await clawdStatus($) }
+    const begin = (name: string, title: string, why: string, image: string, start?: Change<Emote>, replace?: MadeEmote) =>
+      startEmote($, name, title, why, image, 'clawd', start, '', replace)
+    return { text: (await lookCommand($, EMOTE_KIT, arg ?? '', order.rest.slice(1), names, begin)) ?? (await clawdStatus($)) }
   })
 
   // /clawd help uml in colour. The stored row keeps the plain text the model reads.
@@ -1784,10 +2172,10 @@ export const register: Register = on => {
     if (mod.isOff || e.surface !== 'terminal' || e.props.hasSurvey) return next(e)
     const rows = Math.min(await read($, clawdRows), e.props.maxRows)
     const columns = Math.min(CLAWD_MAX_COLUMNS, e.props.bodyColumns)
-    const isShown = (await read($, isClawdOn)) && rows >= CLAWD_MIN_ROWS && columns >= CLAWD_MIN_COLUMNS
+    const isShown = (await read($, isClawdOn)) && rows > 0 && columns > 0
     // With Clawd hidden the menu draws its own top edge.
     const room = e.props.maxRows - (isShown ? rows : 1) - 1
-    const menu = columns >= CLAWD_MIN_COLUMNS && room >= 0 ? await read($, clawdMenu) : null
+    const menu = columns >= MENU_MIN_COLUMNS && room >= 0 ? await read($, clawdMenu) : null
     if (!isShown) clawd.requestId = null
     if (!isShown && !menu) return next(e)
     const engine = await next(e)

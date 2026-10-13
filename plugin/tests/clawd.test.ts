@@ -32,6 +32,7 @@ import {
   WALK,
 } from '../hooks/clawd-sim'
 import type { Emote, Routine, Skin } from '../hooks/clawd-sim'
+import { contextParts, contextRows } from '../hooks/clawd-context'
 import { UML_LEGEND, UML_WIDTH, clawdUml, umlKinds } from '../hooks/clawd-uml'
 import { COMMANDS, marksFor, menuFor, menuLayout, orderOf, writeOut } from '../hooks/clawd-words'
 import type { Names } from '../hooks/clawd-words'
@@ -407,11 +408,13 @@ test('the picker asks for a new act and plays it before it exists, Opus writes i
   expect(traced.prompt).toContain('<new_since_your_last_pick>')
   expect(traced.outcome).toBe('played nothing; new act victory_lap made')
   const debug = logs.findIndex(l => l.startsWith('Clawd debug'))
-  expect(logs.slice(debug)).toEqual([
-    'Clawd debug · autopick, asked with /clawd autopick now · haiku · 1 tokens in, 1 out',
-    `reply: ${traced.reply}`,
-    '→ played nothing; new act victory_lap made',
-  ])
+  const shown = logs.slice(debug)
+  expect(shown[0]).toBe('Clawd debug · autopick, asked with /clawd autopick now · haiku · 1 tokens in, 0 cache read, 0 cache write, 1 out')
+  // The first pick shows the whole request, one row per line.
+  expect(shown[1]).toMatch(/^context · all \d+ parts · /)
+  expect(shown[2]).toBe(`new  │ system: ${traced.system}`)
+  expect(shown.slice(3, -2).map(r => r.slice(7))).toEqual(traced.prompt.split('\n'))
+  expect(shown.slice(-2)).toEqual([`reply: ${traced.reply}`, '→ played nothing; new act victory_lap made'])
   expect((await run('debug'))?.text).toBe('Clawd: debug off.')
   expect((await run('trace'))?.text).toBe('Clawd: autopicks are no longer traced.')
   const path = [...files.keys()].find(p => p === '/home/t/.claude/clawd/acts/victory_lap.json')
@@ -420,6 +423,45 @@ test('the picker asks for a new act and plays it before it exists, Opus writes i
   expect(saved.steps.length).toBe(3)
   expect(rows(blits[blits.length - 1] ?? '', 100)[0]).toMatch(/clawd: victory_lap \(new\) "Victory lap after green tests"$/)
   expect((await run(''))?.text).toContain('Last autopick (asked with /clawd autopick now')
+})
+
+test('debug shows each part of the request in full once, then leaves it out while it stays the same', async () => {
+  const prompt = (summary: string, time: string) =>
+    [`<session_summary>${summary}</session_summary>`, '<situation>', 'trigger: timer', `local time: ${time}`, '</situation>', '<acts>', 'wave: waves', '</acts>', '', 'Return {"calls": []}.'].join('\n')
+  const parts = contextParts('You direct Clawd.', prompt('Tests ran.', 'Thu 10:00'))
+  expect(parts.map(p => p.name)).toEqual(['system', 'session_summary', 'situation', 'acts', 'instructions'])
+  const shown = new Map<string, string>()
+  expect(contextRows(parts, shown)).toEqual([
+    "context · all 5 parts · the CLI's identity block sent before the system prompt is not visible to a mod",
+    'new  │ system: You direct Clawd.',
+    'new  │ <session_summary>Tests ran.</session_summary>',
+    'new  │ <situation>',
+    'new  │ trigger: timer',
+    'new  │ local time: Thu 10:00',
+    'new  │ </situation>',
+    'new  │ <acts>',
+    'new  │ wave: waves',
+    'new  │ </acts>',
+    'new  │ ',
+    'new  │ Return {"calls": []}.',
+  ])
+  // A minute later only the time changed: the situation is shown, its other lines marked same.
+  expect(contextRows(contextParts('You direct Clawd.', prompt('Tests ran.', 'Thu 10:01')), shown)).toEqual([
+    'context · shown: situation · left out, as shown before: system, session_summary, acts, instructions (110 chars)',
+    'same │ <situation>',
+    'same │ trigger: timer',
+    'new  │ local time: Thu 10:01',
+    'same │ </situation>',
+  ])
+  // A summary with a line break stays one part; a second run of loose lines gets a number.
+  const odd = contextParts('', '<session_summary>a\nb</session_summary>\nloose\n<acts>\n</acts>\nend')
+  expect(odd.map(p => [p.name, p.text])).toEqual([
+    ['system', ''],
+    ['session_summary', '<session_summary>a\nb</session_summary>'],
+    ['instructions', 'loose'],
+    ['acts', '<acts>\n</acts>'],
+    ['instructions 2', 'end'],
+  ])
 })
 
 test('a mini Clawd comes for a subagent, takes parallel calls with a delay, and leaves when it is done', async () => {
@@ -622,6 +664,20 @@ test('the band above the prompt holds Clawd, animated by blits, a row taller for
 
   expect((await run('jump 9'))?.text).toBe('Clawd: jump ×5.')
 
+  // However little room the engine gives, the band shows, cut off.
+  const small = await $.ui.mount({
+    plugin: 'clawd',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: { ...props, maxRows: 2, bodyColumns: 8 },
+    viewport: { columns: 8, rows: 40 },
+  })
+  const tiny = await small.find({ type: 'Raster', key: 'clawd' })
+  expect([tiny?.props.columns, tiny?.props.rows]).toEqual([8, 2])
+  const drawn = blits.length
+  await clock.advance(2000)
+  expect(blits.length).toBeGreaterThan(drawn)
+
   await run('off')
   const off = await $.ui.mount({
     plugin: 'clawd',
@@ -772,14 +828,16 @@ test('a skin is Clawd\'s body from the start without a puff, an emote takes over
     n === 'octo' ? skinAsEmote(skin) : undefined,
   )
   expect(glide.steps[0]?.worn?.name).toBe('octo')
-  // A tall skin does not fit a 4-row band: the band asks to grow, and Clawd
-  // stays Clawd until it has (for good in a terminal too short for it).
+  // A tall skin does not fit a 4-row band: the band asks to grow, and the skin
+  // shows with its head cut off until it has (for good in a terminal too short
+  // for it); Clawd's own body never shows.
   const low = createWorld(40, 4, seeded(6))
   low.queue = []
   low.x = 30
   setSkin(low, skin, true)
   step(low)
-  expect(colors(frameCells(low)).has(0x649feb)).toBe(false)
+  expect(colors(frameCells(low)).has(0x649feb)).toBe(true)
+  expect(colors(frameCells(low)).has(0xd77757)).toBe(false)
   expect(wantsTall(low)).toBe(true)
   expect(bandRows(low)).toBe(5)
   resize(low, 40, 5)
@@ -851,6 +909,52 @@ test('without a clawd.json skin, a project root with "matsci" in its path, in an
   expect(octopus(none)).toBeGreaterThan(5)
   expect((await run('list skins'))?.text).toContain('matsci_octopus  a blue octopus')
   expect((await run('emote matsci_octopus'))?.text).toMatch(/^Clawd: nothing is called "matsci_octopus"/)
+})
+
+test("with a clawd.json skin Clawd has no body of its own: the tall skin shows from the first frame in a band too short for it, and /clawd skin has no none", async ($, on) => {
+  const clock = mock.clock(on, { now: 1_700_000_000_000 })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/t', CLAUDE_CLAWD_SEED: '7' })
+  const files = new Map([['/home/t/.claude/clawd/skins/matsci_octopus.json', JSON.stringify({ ...OCTOPUS, name: 'matsci_octopus' })]])
+  on('fs.list', async ($, e) => ({
+    value: [...files.keys()]
+      .filter(p => p.startsWith(`${e.path}/`) && !p.slice(e.path.length + 1).includes('/'))
+      .map(p => ({ name: p.slice(e.path.length + 1), kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false })),
+  }))
+  on('fs.read', async ($, e) => ({ value: e.path.endsWith('/clawd.json') ? JSON.stringify({ skin: 'matsci_octopus' }) : (files.get(e.path) ?? '') }))
+  on('session.root', async () => ({ value: '/home/t/proj' }))
+  const blits: string[] = []
+  on('ui.log', async () => ({ value: undefined }))
+  on('command.register', async ($, e) => ({ value: { command: e.name } }))
+  on('ui.blit', async ($, e) => {
+    if ('cells' in e) blits.push(e.cells)
+    return { value: {} }
+  })
+  on('session.start', async ($, e) => ({ cwd: e.cwd }))
+  on('ui.render', async ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return h(Text, { dimColor: true }, 'engine band') as RenderElement
+  })
+
+  await $.session.start({ cwd: '/home/t/proj', surface: 'terminal', isInteractive: true })
+  await $.ui.mount({
+    plugin: 'clawd',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false, maxRows: 4, bodyColumns: 100, scroll: { offset: 0, bodyRows: 4 }, view: {} },
+    viewport: { columns: 100, rows: 40 },
+  })
+  await clock.advance(2000)
+  expect(blits.filter(c => colors(c).has(0x649feb)).length).toBeGreaterThan(5)
+  expect(blits.filter(c => colors(c).has(0xd77757)).length).toBe(0)
+
+  const run = (args: string) =>
+    $.command.run({ command: 'clawd', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+  expect((await run('skin'))?.text).toBe(
+    `Skin: matsci_octopus ("a blue octopus"); named in the mod's clawd.json. /clawd skin <skin> wears another for this session, auto the one clawd.json names; /clawd list skins names them.`,
+  )
+  expect((await run('skin none'))?.text).toMatch(/^Clawd: nothing is called "none"/)
+  expect((await run('help'))?.text).not.toContain('/clawd skin none')
 })
 
 test('the autopicker calls no model until /clawd autopick switches it on, picks on its timer once on, and stops when switched off', { timeoutMs: 20_000 }, async ($, on) => {
@@ -992,6 +1096,9 @@ test('an emote preview is a PNG of the band in every pose, and a drafts sheet ha
   // In a drafts sheet, a draft that keeps the body gets its poses on Clawd's own body to the right.
   expect(size(emoteSheet([pointer, emoteFrom(OCTOPUS) as Emote], octopus))).toEqual([20 + 10 * 164 + 4, 2 * 104 + 4])
   expect(size(emoteSheet([pointer]))).toEqual([20 + 5 * 144 + 4, 104 + 4])
+  // With a clawd.json skin Clawd has no body of its own: the look shows on the skin only.
+  expect(size(emotePreview(pointer, octopus, true))).toEqual([6 * 164 + 4, 3 * 104 + 4])
+  expect(size(emoteSheet([pointer, emoteFrom(OCTOPUS) as Emote], octopus, true))).toEqual([20 + 5 * 164 + 4, 2 * 104 + 4])
 })
 
 test('a wiggly look crawls in a ripple, one tip lifted at a time and the body level, walking and running', async () => {
@@ -1194,6 +1301,16 @@ test('an emote without shapes keeps the body Clawd has, its own or its skin, and
   expect(q.queue.map(a => a.kind)).toEqual(['idle', 'wave', 'hop'])
 })
 
+// Haiku naming the words after create: the first word and the rest, as it does for
+// "frog a green frog"; a cat in a hat gets a name of its own, and a mystery none.
+function naming(prompt: string): string {
+  const said = /then these words: (.*)/.exec(prompt)?.[1] ?? ''
+  if (said === 'a cat in a hat') return '{"name": "cat_in_a_hat", "title": "a cat in a hat"}'
+  if (said === 'mystery blob thing') return 'no idea'
+  const [name, ...rest] = said.split(' ')
+  return JSON.stringify({ name, title: rest.join(' ') })
+}
+
 test('/clawd emote create has a model draw three drafts after a local image, pick one from their sheet, check its preview, and it plays', async ($, on) => {
   const clock = mock.clock(on, { now: 1_700_000_000_000 })
   mock.store(on)
@@ -1201,6 +1318,12 @@ test('/clawd emote create has a model draw three drafts after a local image, pic
   const files = new Map<string, string>()
   const pngs: string[] = []
   const rounds: { argv: readonly string[]; stdin: string }[] = []
+  const named: string[] = []
+  const usage = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+  on('model.complete', async ($, e) => {
+    named.push(e.prompt)
+    return { value: { isAnswered: true as const, text: naming(e.prompt), usage } }
+  })
   on('ui.log', async () => ({ value: undefined }))
   on('ui.toast', async () => ({ value: undefined }))
   on('command.register', async ($, e) => ({ value: { command: e.name } }))
@@ -1221,7 +1344,8 @@ test('/clawd emote create has a model draw three drafts after a local image, pic
     rounds.push({ argv: e.argv, stdin: e.init?.stdin ?? '' })
     // Round one draws three drafts, one unusable. Round two picks the first and
     // says done, which does not count before it has seen the pick's preview;
-    // round three keeps it. A change (rounds four and five) makes it blue.
+    // round three keeps it. A change (rounds four and five) makes it blue. A
+    // redraw (rounds six and seven) draws one draft and keeps it.
     const drafts = [{ ...OCTOPUS, name: 'whatever' }, { ...OCTOPUS, color: '#40c060' }, { ...OCTOPUS, color: 'blue' }]
     if (rounds.length === 1) return done(`Here they are: ${JSON.stringify({ drafts })}`)
     if (rounds.length === 2) return done(JSON.stringify({ ...OCTOPUS, pick: 1, done: true }))
@@ -1257,9 +1381,11 @@ test('/clawd emote create has a model draw three drafts after a local image, pic
   await clock.advance(200)
   const run = (args: string) =>
     $.command.run({ command: 'clawd', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+  // An emote made before, which the drafts of a new one are told about.
+  files.set('/home/t/.claude/clawd/emotes/yak.json', JSON.stringify({ ...OCTOPUS, name: 'yak', title: 'a shaggy yak' }))
   expect((await run('emote create jump a frog'))?.text).toContain('jump is taken')
-  expect((await run('emote create frog'))?.text).toContain('Usage: /clawd emote create')
-  expect((await run('create frog a frog'))?.text).toBe('Clawd: that is /clawd emote create now.')
+  expect((await run('emote create'))?.text).toContain('Usage: /clawd emote create <name> [image path] [what it looks like]')
+  expect((await run('create frog a frog'))?.text).toBe('Clawd: create what? /clawd act create, /clawd emote create or /clawd skin create.')
   expect((await run('emote create octo ~/pics/octo.png a blue octopus'))?.text).toContain('draws octo after /home/t/pics/octo.png')
   await clock.advance(200)
 
@@ -1272,6 +1398,7 @@ test('/clawd emote create has a model draw three drafts after a local image, pic
   expect(rounds[0]?.argv.filter(a => a.startsWith('Read('))).toHaveLength(1)
   expect(rounds[0]?.argv).toContain('dontAsk')
   expect(rounds[0]?.stdin).toContain('{"drafts": [draft 1, draft 2, draft 3]}')
+  expect(rounds[0]?.stdin).toContain('Clawd has these other emotes. Draw the new one so that it cannot be taken for any of them:\n- yak: Clawd turns into a shaggy yak\n')
   // Round two sees the two usable drafts on one sheet and picks one.
   expect(rounds[1]?.argv.filter(a => a.startsWith('Read('))).toHaveLength(2)
   expect(rounds[1]?.stdin).toContain(`Their sheet is ${data}/emotes/previews/octo.drafts.png`)
@@ -1291,7 +1418,6 @@ test('/clawd emote create has a model draw three drafts after a local image, pic
   const octoFile = `${data}/emotes/octo.json`
   const before = files.get(octoFile)
   expect((await run('emote change oc blue'))?.text).toBe("Clawd: type the emote's full name: /clawd emote change octo.")
-  expect((await run('emote change octo'))?.text).toContain('Usage: /clawd emote change octo')
   expect((await run('emote edit octo make it blue'))?.text).toContain('a model changes octo: "make it blue"')
   await clock.advance(200)
   expect(rounds.length).toBe(5)
@@ -1306,11 +1432,305 @@ test('/clawd emote create has a model draw three drafts after a local image, pic
   expect(kept).toHaveLength(1)
   expect(files.get(kept[0] ?? '')).toBe(before)
 
+  // /clawd emote change with nothing to change draws the emote again from scratch, into the same file.
+  const blue = files.get(octoFile)
+  expect((await run('emote edit octo'))?.text).toContain('a model draws octo again from scratch after "a blue octopus"')
+  await clock.advance(200)
+  expect(rounds.length).toBe(7)
+  expect(rounds[5]?.stdin).toContain('"drafts"')
+  expect(rounds[5]?.stdin).toContain('- yak: ')
+  expect(rounds[5]?.stdin).not.toContain('- octo: ')
+  expect(rounds[5]?.stdin).not.toContain('The look as it is now')
+  expect(rounds[5]?.argv).toContain('Read(//home/t/pics/octo.png)')
+  const redrawn = JSON.parse(files.get(octoFile) ?? '{}')
+  expect([redrawn.color, redrawn.change, redrawn.image]).toEqual([OCTOPUS.color, undefined, '/home/t/pics/octo.png'])
+  const keptNow = [...files.keys()].filter(p => p.startsWith(`${data}/emotes/old/octo.`))
+  expect(keptNow).toHaveLength(2)
+  expect(keptNow.map(p => files.get(p))).toContain(blue)
+
   // /clawd emote delete moves the file to data/emotes/old/, and the emote is gone.
   expect((await run('emote dele octo'))?.text).toBe('Clawd: type delete in full; it removes an emote.')
   expect((await run('emote delete octo'))?.text).toMatch(/^Clawd: octo is deleted\. Its file is now \/home\/t\/\.claude\/clawd\/emotes\/old\/octo\.[-0-9TZ]+\.json; move it back to undo\.$/)
   expect(files.has(octoFile)).toBe(false)
   expect((await run('list emotes'))?.text).not.toContain('octo')
+
+  // The name alone is enough: the model draws from it in words, and capitals become snake_case.
+  expect((await run('emote create ClaudeWithGlasses'))?.text).toBe('Clawd: a model draws claude_with_glasses, in up to 3 rounds of a minute or two; it plays when done.')
+  await clock.advance(200)
+  expect(rounds[7]?.stdin).toContain('The look: claude_with_glasses, "claude with glasses".')
+  expect(rounds[7]?.stdin).toContain('There is no reference image; draw it from the title.')
+  expect(files.has(`${data}/emotes/claude_with_glasses.json`)).toBe(true)
+  // An image path in place of the name gives the name from its file.
+  expect((await run('emote create ~/pics/round-glasses.png'))?.text).toContain('a model draws round_glasses after /home/t/pics/round-glasses.png')
+  await clock.advance(200)
+  expect(rounds[9]?.stdin).toContain('The look: round_glasses, "round glasses".')
+  expect(rounds[9]?.argv).toContain('Read(//home/t/pics/round-glasses.png)')
+
+  // A sentence gets its name from Haiku, told the kind and the names already taken.
+  expect((await run('emote create a cat in a hat'))?.text).toBe(
+    'Clawd: a model draws cat_in_a_hat (named by haiku), in up to 3 rounds of a minute or two; it plays when done.',
+  )
+  const asked = named[named.length - 1] ?? ''
+  expect(asked).toContain('The person typed /clawd emote create, then these words: a cat in a hat\nAn emote is a look Clawd takes for a while.')
+  expect(asked).toMatch(/Names already taken, which the new one may not have: .*\bjump\b.*\bclaude_with_glasses\b/)
+  await clock.advance(200)
+  expect(rounds[11]?.stdin).toContain('The look: cat_in_a_hat, "a cat in a hat".')
+  // Without a usable name from Haiku, the first word is the name.
+  expect((await run('emote create mystery blob thing'))?.text).toContain('a model draws mystery,')
+  await clock.advance(200)
+  expect(rounds[13]?.stdin).toContain('The look: mystery, "blob thing".')
+})
+
+test('/clawd act create, change, delete and preview work as the emote commands do: Opus writes the act, the old file is kept, a preview is a PNG', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_700_000_000_000 })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/t', CLAUDE_CLAWD_SEED: '7' })
+  const files = new Map<string, string>()
+  const pngs: string[] = []
+  const prompts: string[] = []
+  const toasts: string[] = []
+  const usage = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+  on('ui.log', async () => ({ value: undefined }))
+  on('ui.toast', async ($, e) => {
+    toasts.push(JSON.stringify(e))
+    return { value: undefined }
+  })
+  on('command.register', async ($, e) => ({ value: { command: e.name } }))
+  on('ui.blit', async () => ({ value: {} }))
+  on('process.run', async ($, e) => {
+    const done = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    if (e.argv[0] === 'python3') {
+      pngs.push(e.argv[3] ?? '')
+      return done('')
+    }
+    if (e.argv[0] === 'mv') {
+      const [, , from = '', to = ''] = e.argv
+      files.set(to, files.get(from) ?? '')
+      files.delete(from)
+      return done('')
+    }
+    return done('Sat 17:00\n')
+  })
+  on('fs.stat', async ($, e) => ({ value: { kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false, realPath: e.path } }))
+  on('fs.list', async ($, e) => ({
+    value: [...files.keys()]
+      .filter(p => p.startsWith(`${e.path}/`) && !p.slice(e.path.length + 1).includes('/'))
+      .map(p => ({ name: p.slice(e.path.length + 1), kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false })),
+  }))
+  on('fs.read', async ($, e) => ({ value: files.get(e.path) ?? '' }))
+  on('fs.write', async ($, e) => {
+    files.set(e.path, e.text)
+    return { value: undefined }
+  })
+  // Opus writes three steps for a new act or a rewrite, and two for a change; the
+  // first write waits for the gate. Haiku asks for the act being written.
+  let open = () => {}
+  const gate = new Promise<void>(resolve => (open = resolve))
+  on('session.id', async () => ({ value: 'sess-1' }))
+  on('model.complete', async ($, e) => {
+    if (e.model === 'haiku' && e.prompt.startsWith('The person typed')) return { value: { isAnswered: true as const, text: naming(e.prompt), usage } }
+    if (e.model === 'haiku') {
+      const ask = '{"summary": "", "calls": [{"who": "clawd", "play": "wave"}], "why": "", "new": {"name": "cartwheel", "title": "a cartwheel", "for": "clawd"}}'
+      return { value: { isAnswered: true as const, text: ask, usage } }
+    }
+    if (prompts.length === 0) await gate
+    prompts.push(e.prompt)
+    const text = e.prompt.startsWith('Change')
+      ? '{"steps": [{"do": "run", "to": 0.9, "arms": "wave"}, {"do": "sparks", "n": 4}]}'
+      : '{"steps": [{"do": "run", "to": 0.9}, {"do": "hop", "n": 2}, {"do": "wave", "dur": 1}]}'
+    return { value: { isAnswered: true as const, text, usage } }
+  })
+  on('session.start', async ($, e) => ({ cwd: e.cwd }))
+  on('ui.render', async ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return h(Text, { dimColor: true }, 'engine band') as RenderElement
+  })
+
+  await $.session.start({ cwd: '/home/t/proj', surface: 'terminal', isInteractive: true })
+  await $.ui.mount({
+    plugin: 'clawd',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 100, scroll: { offset: 0, bodyRows: 20 }, view: {} },
+    viewport: { columns: 100, rows: 40 },
+  })
+  await clock.advance(200)
+  const run = (args: string) =>
+    $.command.run({ command: 'clawd', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+  const data = '/home/t/.claude/clawd'
+  const file = `${data}/acts/cartwheel.json`
+
+  expect((await run('act create jump a big jump'))?.text).toBe('Clawd: jump is taken; pick another name.')
+  expect((await run('act create list lists things'))?.text).toBe('Clawd: list is taken; pick another name.')
+  expect((await run('act create'))?.text).toContain('Usage: /clawd act create <name> [what it does]')
+  expect((await run('act create cartwheel turns a cartwheel across the band'))?.text).toBe('Clawd: opus writes cartwheel, in a minute or two; it plays when done.')
+  // One model makes one thing at a time, an act, an emote or a skin.
+  expect((await run('act create flip does a flip'))?.text).toBe('Clawd: cartwheel is still being made; one at a time.')
+  expect((await run('emote create frog a green frog'))?.text).toBe('Clawd: cartwheel is still being made; one at a time.')
+  // The picker may not ask for the act being written either.
+  await run('trace')
+  await clock.advance(10)
+  await run('autopick now')
+  await clock.advance(10)
+  const picked = JSON.parse(files.get(`${data}/picks/sess-1.jsonl`)?.trim().split('\n').pop() ?? '{}')
+  expect(picked.outcome).toBe('played clawd: wave; new act cartwheel asked, but it is still being made')
+  open()
+  await clock.advance(200)
+  expect(prompts[0]).toMatch(/^Write the steps for a new act\.\nname: cartwheel\ntitle: turns a cartwheel across the band\n/)
+  const saved = JSON.parse(files.get(file) ?? '{}')
+  expect([saved.title, saved.why, saved.steps.length, saved.change]).toEqual(['turns a cartwheel across the band', 'asked for with /clawd act create', 3, undefined])
+  expect(toasts.some(t => t.includes('Clawd has a new act: cartwheel'))).toBe(true)
+  expect((await run('list made'))?.text).toContain('cartwheel')
+
+  // A preview runs the act and draws the band every half second, one frame per line.
+  const shown = (await run('act preview cartw'))?.text ?? ''
+  expect(shown).toMatch(/^Clawd: cartwheel in \d+ frames, the band every 0\.5 s from top to bottom, is in \/home\/t\/\.claude\/clawd\/acts\/previews\/cartwheel\.png\.$/)
+  expect(pngs).toContain(`${data}/acts/previews/cartwheel.png`)
+  expect((await run('act preview jump'))?.text).toContain(`${data}/acts/previews/jump.png`)
+  expect((await run('act preview frog'))?.text).toBe('Clawd: no act frog. /clawd list acts and /clawd list made name them.')
+
+  // A change starts from the steps as they are, and the old file is kept.
+  const before = files.get(file)
+  expect((await run('act edit cartwheel "faster, with sparks"'))?.text).toBe(
+    `Clawd: opus changes cartwheel: "faster, with sparks", in a minute or two; it plays when done. The old act goes to ${data}/acts/old/ once the new one is saved.`,
+  )
+  await clock.advance(200)
+  expect(prompts[1]).toMatch(/^Change the steps of an act\.\nname: cartwheel\n/)
+  expect(prompts[1]).toContain('The act as it is now: {"steps":[{"do":"run","to":0.9},{"do":"hop","n":2},{"do":"wave","dur":1}]}')
+  expect(prompts[1]).toContain('The change asked for now: "faster, with sparks". Make that change and keep what it does not touch.')
+  const changed = JSON.parse(files.get(file) ?? '{}')
+  expect([changed.title, changed.change, changed.steps.length]).toEqual(['turns a cartwheel across the band', 'faster, with sparks', 2])
+  const kept = [...files.keys()].filter(p => p.startsWith(`${data}/acts/old/cartwheel.`))
+  expect(kept).toHaveLength(1)
+  expect(files.get(kept[0] ?? '')).toBe(before)
+  expect(toasts.some(t => t.includes("Clawd's act cartwheel is changed"))).toBe(true)
+
+  // A change with no words writes the act again from scratch, from its title.
+  expect((await run('act change cartwheel'))?.text).toContain('opus writes cartwheel again from scratch after "turns a cartwheel across the band"')
+  await clock.advance(200)
+  expect(prompts[2]).toMatch(/^Write the steps for a new act\.\nname: cartwheel\n/)
+  expect(prompts[2]).not.toContain('The act as it is now')
+  expect(prompts[2]).toContain('Made acts: none yet.')
+  const rewritten = JSON.parse(files.get(file) ?? '{}')
+  expect([rewritten.change, rewritten.steps.length]).toEqual([undefined, 3])
+  expect([...files.keys()].filter(p => p.startsWith(`${data}/acts/old/cartwheel.`))).toHaveLength(2)
+
+  // Only a made act can be deleted; its file goes to acts/old/.
+  expect((await run('act delete jump'))?.text).toBe('Clawd: jump is built in; only made acts can be deleted. /clawd list made shows them.')
+  expect((await run('act dele cartwheel'))?.text).toBe('Clawd: type delete in full; it removes an act.')
+  expect((await run('act delete cartwheel'))?.text).toMatch(/^Clawd: cartwheel is deleted\. Its file is now \/home\/t\/\.claude\/clawd\/acts\/old\/cartwheel\.[-0-9TZ]+\.json; move it back to undo\.$/)
+  expect(files.has(file)).toBe(false)
+  expect((await run('list made'))?.text).not.toContain('cartwheel')
+
+  // The name alone is enough, and hyphens become snake_case.
+  expect((await run('act create Back-Flip'))?.text).toBe('Clawd: opus writes back_flip, in a minute or two; it plays when done.')
+  await clock.advance(200)
+  expect(prompts[3]).toMatch(/^Write the steps for a new act\.\nname: back_flip\ntitle: back flip\n/)
+  expect(JSON.parse(files.get(`${data}/acts/back_flip.json`) ?? '{}').title).toBe('back flip')
+  // A sentence gets its name from Haiku, as for a look.
+  expect((await run('act create a cat in a hat'))?.text).toBe('Clawd: opus writes cat_in_a_hat (named by haiku), in a minute or two; it plays when done.')
+  await clock.advance(200)
+  expect(prompts[4]).toMatch(/^Write the steps for a new act\.\nname: cat_in_a_hat\ntitle: a cat in a hat\n/)
+})
+
+test('the picker may have a new skin drawn or call one that exists, and Clawd wears it for the session, unless the person chose a skin with /clawd skin', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_700_000_000_000 })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/t', CLAUDE_CLAWD_SEED: '7' })
+  const data = '/home/t/.claude/clawd'
+  // A skin made an hour ago, which counts towards the new ones of the last 24 hours.
+  const files = new Map([[`${data}/skins/pirate.json`, JSON.stringify({ ...OCTOPUS, name: 'pirate', title: 'a pirate octopus', made: '2023-11-14T21:00:00.000Z' })]])
+  const rounds: string[] = []
+  const prompts: string[] = []
+  const replies: string[] = []
+  const usage = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+  on('ui.log', async () => ({ value: undefined }))
+  on('ui.toast', async () => ({ value: undefined }))
+  on('command.register', async ($, e) => ({ value: { command: e.name } }))
+  on('ui.blit', async () => ({ value: {} }))
+  on('process.run', async ($, e) => {
+    const done = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    if (e.argv[0] !== 'claude') return done(e.argv[0] === 'python3' ? '' : 'Sat 17:00\n')
+    rounds.push(e.init?.stdin ?? '')
+    // Three drafts, the first picked, then kept once its preview is seen.
+    if (rounds.length === 1) return done(JSON.stringify({ drafts: [OCTOPUS, { ...OCTOPUS, color: '#808080' }, { ...OCTOPUS, color: '#c0c0c0' }] }))
+    return done(JSON.stringify({ ...OCTOPUS, pick: 1, done: true }))
+  })
+  on('fs.stat', async ($, e) => ({ value: { kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false, realPath: e.path } }))
+  on('fs.list', async ($, e) => ({
+    value: [...files.keys()]
+      .filter(p => p.startsWith(`${e.path}/`) && !p.slice(e.path.length + 1).includes('/'))
+      .map(p => ({ name: p.slice(e.path.length + 1), kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false })),
+  }))
+  on('fs.read', async ($, e) => ({ value: files.get(e.path) ?? '' }))
+  on('fs.write', async ($, e) => {
+    files.set(e.path, e.text)
+    return { value: undefined }
+  })
+  on('session.id', async () => ({ value: 'sess-1' }))
+  on('model.complete', async ($, e) => {
+    prompts.push(e.prompt)
+    return { value: { isAnswered: true as const, text: replies.shift() ?? '{"calls": [{"who": "clawd", "play": "wave"}], "new": null}', usage } }
+  })
+  on('session.start', async ($, e) => ({ cwd: e.cwd }))
+  on('ui.render', async ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return h(Text, { dimColor: true }, 'engine band') as RenderElement
+  })
+
+  await $.session.start({ cwd: '/home/t/proj', surface: 'terminal', isInteractive: true })
+  await $.ui.mount({
+    plugin: 'clawd',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 100, scroll: { offset: 0, bodyRows: 20 }, view: {} },
+    viewport: { columns: 100, rows: 40 },
+  })
+  await clock.advance(200)
+  const run = (args: string) =>
+    $.command.run({ command: 'clawd', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+  const outcome = () => JSON.parse(files.get(`${data}/picks/sess-1.jsonl`)?.trim().split('\n').pop() ?? '{}').outcome
+  const autopick = async (reply: string) => {
+    replies.push(reply)
+    await run('autopick now')
+    await clock.advance(200)
+    return prompts[prompts.length - 1] ?? ''
+  }
+  await run('trace')
+
+  // Asked to stay a cat, the picker has a skin drawn, as an emote is drawn, and Clawd wears it.
+  const first = await autopick(
+    '{"summary": "", "calls": [{"who": "clawd", "play": "wave"}], "why": "asked", "new": {"name": "cat", "title": "a grey cat", "for": "clawd", "look": "skin"}}',
+  )
+  expect(first).toContain("pirate: a skin, clawd only, for the rest of the session: Clawd's body becomes a pirate octopus")
+  expect(first).toContain('Add "look": "skin" instead when they ask Clawd to stay that thing from now on')
+  expect(first).toContain('1 of at most 5 new acts, emotes and skins were made in the last 24 hours.')
+  expect(outcome()).toBe('played clawd: wave; new skin cat being drawn')
+  expect(rounds.length).toBe(3)
+  expect(rounds[0]).toContain('{"drafts": [draft 1, draft 2, draft 3]}')
+  expect(JSON.parse(files.get(`${data}/skins/cat.json`) ?? '{}').name).toBe('cat')
+  expect((await run('skin'))?.text).toMatch(/^Skin: cat \("a blue octopus"\); picked by the autopicker for this session; \/clawd skin auto goes back\./)
+
+  // A skin that exists is called like an act.
+  const second = await autopick('{"summary": "", "calls": [{"who": "clawd", "play": "pirate"}], "why": "asked", "new": null}')
+  expect(second).toContain('2 of at most 5 new acts, emotes and skins were made in the last 24 hours.')
+  expect(second).not.toContain('cat: a skin')
+  expect(outcome()).toBe('played clawd: pirate; no new act')
+  expect((await run('skin'))?.text).toMatch(/^Skin: pirate \("a pirate octopus"\); picked by the autopicker/)
+
+  // auto drops the picker's skin.
+  expect((await run('skin auto'))?.text).toBe("Clawd: Skin: none, Clawd's own body.")
+
+  // After the person chose a skin, even Clawd's own body, the picker sees no skins and may not make one.
+  await run('skin none')
+  const third = await autopick(
+    '{"summary": "", "calls": [{"who": "clawd", "play": "pirate"}], "why": "asked", "new": {"name": "dog", "title": "a dog", "for": "clawd", "look": "skin"}}',
+  )
+  expect(third).not.toContain('a skin, clawd only')
+  expect(third).not.toContain('"look": "skin"')
+  expect(outcome()).toBe('played nothing; new skin dog refused: the person chose a skin with /clawd skin')
+  expect(files.has(`${data}/skins/dog.json`)).toBe(false)
+  expect((await run('skin'))?.text).toMatch(/^Skin: none, Clawd's own body; chosen with \/clawd skin for this session\./)
 })
 
 const NAMES: Names = {
@@ -1338,16 +1758,31 @@ test('/clawd words may be cut short while they fit one name, and say what is wro
   expect(orderOf(['pick'], NAMES)).toEqual({ kind: 'command', name: 'autopick', rest: [] })
   expect(orderOf(['of'], NAMES)).toEqual({ kind: 'command', name: 'off', rest: [] })
   expect(orderOf(['emote', 'cre', 'frog', 'a', 'frog'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: type create in full; it starts a model run.' })
-  expect(orderOf(['emote', 'create', 'frog', 'a', 'frog'], NAMES)).toEqual({ kind: 'command', name: 'create', rest: ['frog', 'a', 'frog'] })
-  expect(orderOf(['emote', 'delete', 'moon_jelly'], NAMES)).toEqual({ kind: 'command', name: 'delete', rest: ['moon_jelly'] })
+  expect(orderOf(['emote', 'create', 'frog', 'a', 'frog'], NAMES)).toEqual({ kind: 'command', name: 'emote', rest: ['create', 'frog', 'a', 'frog'] })
+  expect(orderOf(['emote', 'delete', 'moon_jelly'], NAMES)).toEqual({ kind: 'command', name: 'emote', rest: ['delete', 'moon_jelly'] })
   expect(orderOf(['emote', 'delete', 'moo'], NAMES)).toEqual({ kind: 'unclear', text: "Clawd: type the emote's full name: /clawd emote delete moon_jelly." })
   expect(orderOf(['emote', 'delete', 'frog'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: there is no emote frog. /clawd list emotes shows them.' })
-  expect(orderOf(['emote', 'change'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: which emote? /clawd emote change <emote> <what to change>.' })
+  expect(orderOf(['emote', 'change'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: which emote? /clawd emote change <emote> [what to change].' })
   expect(orderOf(['emote', 'chan', 'moon_jelly', 'blue'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: type change in full; it starts a model run.' })
-  expect(orderOf(['emote', 'modify', 'moon_jelly', 'blue'], NAMES)).toEqual({ kind: 'command', name: 'change', rest: ['moon_jelly', 'blue'] })
-  expect(orderOf(['emote', 'prev', 'moon_jelly'], NAMES)).toEqual({ kind: 'command', name: 'preview', rest: ['moon_jelly'] })
-  expect(orderOf(['delete', 'moon_jelly'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: that is /clawd emote delete now.' })
-  expect(orderOf(['edit', 'moon_jelly'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: that is /clawd emote change now.' })
+  expect(orderOf(['emote', 'modify', 'moon_jelly', 'blue'], NAMES)).toEqual({ kind: 'command', name: 'emote', rest: ['change', 'moon_jelly', 'blue'] })
+  expect(orderOf(['emote', 'prev', 'moon_jelly'], NAMES)).toEqual({ kind: 'command', name: 'emote', rest: ['preview', 'moon_jelly'] })
+  expect(orderOf(['delete', 'moon_jelly'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: delete what? /clawd act delete, /clawd emote delete or /clawd skin delete.' })
+  expect(orderOf(['edit', 'moon_jelly'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: change what? /clawd act change, /clawd emote change or /clawd skin change.' })
+  // Acts take the same commands as emotes and skins; change and delete take a made act only.
+  expect(orderOf(['act'], NAMES)).toEqual({
+    kind: 'unclear',
+    text: 'Clawd: which act? /clawd act <act> plays one; act create, change, delete and preview work on them. /clawd list acts shows them.',
+  })
+  expect(orderOf(['act', 'create', 'cartwheel', 'turns', 'a', 'cartwheel'], NAMES)).toEqual({ kind: 'command', name: 'act', rest: ['create', 'cartwheel', 'turns', 'a', 'cartwheel'] })
+  expect(orderOf(['act', 'cre', 'cartwheel', 'turns'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: type create in full; it starts a model run.' })
+  expect(orderOf(['act', 'delete', 'build'], NAMES)).toEqual({ kind: 'command', name: 'act', rest: ['delete', 'build'] })
+  expect(orderOf(['act', 'dele', 'build'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: type delete in full; it removes an act.' })
+  expect(orderOf(['act', 'delete', 'jump'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: jump is built in; only made acts can be deleted. /clawd list made shows them.' })
+  expect(orderOf(['act', 'change', 'oct'], NAMES)).toEqual({ kind: 'unclear', text: "Clawd: type the act's full name: /clawd act change octopus_wiggle." })
+  expect(orderOf(['act', 'change', 'frog'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: there is no act frog. /clawd list made shows them.' })
+  expect(orderOf(['act', 'edit', 'build', 'faster'], NAMES)).toEqual({ kind: 'command', name: 'act', rest: ['change', 'build', 'faster'] })
+  expect(orderOf(['act', 'prev', 'ju'], NAMES)).toEqual({ kind: 'command', name: 'act', rest: ['preview', 'ju'] })
+  expect(orderOf(['a1', 'create'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: nothing is called "create". /clawd list acts shows what there is.' })
   expect(orderOf(['xyz'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: nothing is called "xyz". /clawd help shows what there is.' })
   expect(orderOf(['o'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: "o" fits 3 names: on, off, octopus_wiggle. Type more of it.' })
   expect(orderOf(['act', 'moon'], NAMES)).toEqual({ kind: 'unclear', text: 'Clawd: moon_jelly is an emote; /clawd emote moon_jelly plays it.' })
@@ -1378,8 +1813,8 @@ test('while /clawd is typed, a framed list shows what the word fits, a space wri
     rows: ['help', 'act', 'emote', 'skin', 'list', 'on', 'off'].map(name => ({ name, what: COMMANDS[name], from: 0, to: 0 })),
     foot: '+4 more: autopick trace debug a1',
   })
-  expect(menu('/clawd act c')).toEqual({
-    title: '/clawd act',
+  expect(menu('/clawd a1 c')).toEqual({
+    title: '/clawd a1',
     note: 'acts that fit "c"',
     rows: [
       { name: 'celebrate', what: 'two hops', from: 0, to: 1 },
@@ -1389,6 +1824,9 @@ test('while /clawd is typed, a framed list shows what the word fits, a space wri
     count: '2 of 7 fit',
     next: 'then [1-5] times in a row',
   })
+  // After act come its commands, as after emote and skin, then the acts.
+  expect(menu('/clawd act c')).toMatchObject({ title: '/clawd act', note: 'names that fit "c"', count: '4 of 11 fit', next: '' })
+  expect(names('/clawd act c')).toEqual(['create', 'change', 'celebrate', 'chase'])
   expect(menu('/clawd act wav')).toEqual({
     title: '/clawd act',
     note: 'space writes it out',
@@ -1404,11 +1842,19 @@ test('while /clawd is typed, a framed list shows what the word fits, a space wri
   expect(menu('/clawd wig')?.rows).toEqual([{ name: 'octopus_wiggle', what: 'made act: turns into an octopus', from: 8, to: 11 }])
   const o = menu('/clawd o')
   expect(o && menuLayout(o, 2).foot).toBe('3 of 19 fit · +1 more: octopus_wiggle')
-  expect(menu('/clawd act ')).toMatchObject({ title: '/clawd act', note: '7 acts' })
-  expect(names('/clawd act ')).toEqual(['octopus_wiggle', 'build', 'jump', 'hop', 'celebrate', 'chase', 'wave'])
+  expect(menu('/clawd act ')).toMatchObject({ title: '/clawd act', note: '11 names' })
+  expect(names('/clawd act ')).toEqual(['create', 'change', 'delete', 'preview', 'octopus_wiggle', 'build', 'jump', 'hop', 'celebrate', 'chase', 'wave'])
   expect(names('/clawd a1 ')).toEqual(['octopus_wiggle', 'build', 'jump', 'hop', 'celebrate', 'chase', 'wave'])
   expect(names('/clawd emote ')).toEqual(['create', 'change', 'delete', 'preview', 'moon_jelly'])
+  expect(names('/clawd skin ')).toEqual(['auto', 'none', 'create', 'change', 'delete', 'preview', 'matsci_octopus'])
   expect(names('/clawd emote edit ')).toEqual(['moon_jelly'])
+  expect(menu('/clawd act change ')).toMatchObject({ title: '/clawd act change', note: '2 made acts' })
+  expect(names('/clawd act delete ')).toEqual(['octopus_wiggle', 'build'])
+  expect(names('/clawd act preview ')).toEqual(['octopus_wiggle', 'build', 'jump', 'hop', 'celebrate', 'chase', 'wave'])
+  expect(menu('/clawd act create ')).toMatchObject({ title: '/clawd act create', note: '<new_name> in snake_case', rows: [] })
+  expect(menu('/clawd act create cartwheel tu')).toMatchObject({ note: '[what it does; else the name says it]' })
+  expect(menu('/clawd skin create claude_with_glasses ')).toMatchObject({ note: '[image path] [what it looks like; else the name says it]' })
+  expect(menu('/clawd act change build ')).toMatchObject({ note: '[what to change; nothing writes it again]' })
   expect(names('/clawd list ')).toEqual(['acts', 'made', 'emotes', 'skins', 'minis'])
   expect(names('/clawd help ')).toEqual(['uml'])
   expect(menu('/clawd moo')).toMatchObject({ note: 'space writes it out', isOne: true, next: '' })
@@ -1417,8 +1863,8 @@ test('while /clawd is typed, a framed list shows what the word fits, a space wri
   expect(menu('/clawd jump 3 ')).toBeUndefined()
   expect(menu('/clawd on ')).toBeUndefined()
   expect(menu('/clawd emote create ')).toMatchObject({ title: '/clawd emote create', note: '<new_name> in snake_case', rows: [] })
-  expect(menu('/clawd emote create frog a fr')).toMatchObject({ title: '/clawd emote create', note: '[image path] <what it looks like>' })
-  expect(menu('/clawd emote change moon_jelly ')).toMatchObject({ title: '/clawd emote change', note: '[image path] <what to change>' })
+  expect(menu('/clawd emote create frog a fr')).toMatchObject({ title: '/clawd emote create', note: '[image path] [what it looks like; else the name says it]' })
+  expect(menu('/clawd emote change moon_jelly ')).toMatchObject({ title: '/clawd emote change', note: '[image path] [what to change; nothing draws it again]' })
   expect(menu('/clawd emote moon_jelly ')).toBeUndefined()
   expect(menu('/clawd zz')).toMatchObject({ note: 'nothing is called "zz"', rows: [], next: '/clawd help shows what there is' })
 
@@ -1430,6 +1876,7 @@ test('while /clawd is typed, a framed list shows what the word fits, a space wri
   expect(writeOut('/clawd jump ', 12, NAMES)).toBeUndefined()
   expect(writeOut('/clawd emote create fr ', 23, NAMES)).toBeUndefined()
   expect(writeOut('/clawd emote delete m ', 22, NAMES)).toEqual({ text: '/clawd emote delete moon_jelly ', cursor: 31 })
+  expect(writeOut('/clawd act delete b ', 20, NAMES)).toEqual({ text: '/clawd act delete build ', cursor: 24 })
 
   expect(marksFor('/clawd ju 3', NAMES)).toEqual([{ start: 7, end: 9, isFit: true }])
   expect(marksFor('/clawd a1 zz', NAMES)).toEqual([
@@ -1446,7 +1893,7 @@ test('the menu draws below Clawd in the band, one row per fit, framed to the ban
   on('command.register', async ($, e) => ({ value: { command: e.name } }))
   on('session.start', async ($, e) => ({ cwd: e.cwd }))
   // prompt.edit cannot be raised from a test, so the test answers the menu's state itself.
-  let menu = menuFor('/clawd act c', 12, NAMES) ?? null
+  let menu = menuFor('/clawd a1 c', 11, NAMES) ?? null
   on('state.get', async ($, e, next) => (e.plugin === 'clawd' && e.key === 'clawdMenu' ? { value: { value: menu, version: 1 } } : next(e)))
   on('ui.render', async ($, e) => {
     const { Text } = $.ui.resolve(e)
@@ -1471,7 +1918,7 @@ test('the menu draws below Clawd in the band, one row per fit, framed to the ban
   await $.command.run({ command: 'clawd', args: 'off', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 60 } })
   const off = await mount(20)
   expect(await off.find({ type: 'Raster', key: 'clawd' })).toBeUndefined()
-  expect((await off.find({ key: 'menu-top' }))?.text).toMatch(/^╭─ \/clawd act · acts that fit "c" ─+╮$/)
+  expect((await off.find({ key: 'menu-top' }))?.text).toMatch(/^╭─ \/clawd a1 · acts that fit "c" ─+╮$/)
   expect(await off.find({ key: 'menu-1' })).toBeDefined()
   menu = null
   expect(await (await mount(20)).find({ key: 'menu-bottom' })).toBeUndefined()
@@ -1498,7 +1945,7 @@ test('/clawd help uml draws the three diagrams with the numbers it is given, non
     const text = lines.join('\n')
     expect(text).toContain('1. Clawd (UML state machine)')
     expect(text).toContain('2. A mini Clawd (UML state machine): one per running subagent, at most 6.')
-    expect(text).toContain('3. A new act or emote (UML activity diagram)')
+    expect(text).toContain('3. A new act, emote or skin (UML activity diagram)')
     expect(text).toContain('after 180 s')
     expect(text).toContain('15 min without an event / trip')
     expect(text).toContain(`${pickModel} reads what happened and every`)
@@ -1536,7 +1983,7 @@ test('/clawd help uml draws in colour, each run by what it is, and other /clawd 
   expect(kindOf('●')).toBe('end')
   expect(kindOf('◉')).toBe('end')
   expect(kindOf('◇')).toBe('guard')
-  expect(kindOf('[new.look]')).toBe('guard')
+  expect(kindOf('[new.look: become, hold or skin]')).toBe('guard')
   expect(kindOf('[1]')).toBe('footnote')
   expect(kindOf(/^─+┘$/)).toBe('flow')
   expect(kindOf(/^─+▶$/)).toBe('flow')
@@ -1552,7 +1999,7 @@ test('/clawd help uml draws in colour, each run by what it is, and other /clawd 
   for (const [i, line] of lines.entries()) expect((await row.find({ key: `uml-${i}` }))?.text).toBe(line || ' ')
   expect((await row.find({ type: 'Text', text: /^╭─+╮$/ }))?.props.color).toBe('#d77757')
   expect((await row.find({ type: 'Text', text: /^ Idle +$/ }))?.props.bold).toBe(true)
-  expect((await row.find({ type: 'Text', text: /^\[new\.look\]$/ }))?.props.color).toBe('#e0b84a')
+  expect((await row.find({ type: 'Text', text: /^\[new\.look: become, hold or skin\]$/ }))?.props.color).toBe('#e0b84a')
   const status = await $.ui.mount({
     plugin: 'clawd',
     surface: 'terminal',

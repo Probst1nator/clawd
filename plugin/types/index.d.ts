@@ -5,6 +5,7 @@ export type ClawdState = {
   isTracing: boolean
   isDebugging: boolean
   clawdSkin: string | null
+  clawdPickedSkin: string | null
   clawdMenu: {
     title: string
     note: string
@@ -28,6 +29,8 @@ declare module 'claude-code' {
       isDebugging: boolean
       /** The skin /clawd skin chose for this session: a skin's name, '' for Clawd's own body; null: none chosen, clawd.json or the project folder decides. */
       clawdSkin: string | null
+      /** The skin the autopicker called or had drawn for this session: a skin's name; null: none. A /clawd skin choice wins over it; /clawd skin auto clears both. */
+      clawdPickedSkin: string | null
       /** The framed list above the prompt while a /clawd command is typed (clawd-words.ts `Menu`); null otherwise. */
       clawdMenu: {
         title: string

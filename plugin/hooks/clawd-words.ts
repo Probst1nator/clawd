@@ -1,8 +1,6 @@
-// `/clawd` as typed (user, 2026-10-04: "make this easier to use", then
-// "autocomplete and stuff"). A word may be cut short while it fits one name
+// `/clawd` as typed. A word may be cut short while it fits one name
 // (`/clawd cel` plays celebrate). While the person types, a framed list
-// above the prompt shows the names the word at the cursor fits (`menuFor`;
-// user, 2026-10-05: a dropdown list in a box, Clawd standing on its top edge),
+// above the prompt shows the names the word at the cursor fits (`menuFor`),
 // the words are painted green (fits one name) or red (fits none), and a space
 // after a word that fits one name writes it out. Tab never reaches a plugin, so
 // the space does its job. Pure, no `$`: register.tsx passes the names in and
@@ -13,7 +11,7 @@ export const MAX_REPEAT = 5 // `/clawd jump 3`: at most this many in a row
 /** The words `/clawd` takes besides acts, emotes and minis, with what each does. */
 export const COMMANDS: Readonly<Record<string, string>> = {
   help: 'what Clawd plays and every command; help uml draws it',
-  act: 'Clawd plays an act: a move such as jump or wave',
+  act: 'Clawd plays an act: a move such as jump or wave; act create, change, delete, preview',
   emote: "Clawd takes an emote's look for a while; emote create, change, delete, preview",
   skin: "Clawd's body for this session: a skin, auto or none; skin create, change, delete, preview",
   list: 'the names of one kind: acts, made, emotes, skins or minis',
@@ -21,27 +19,36 @@ export const COMMANDS: Readonly<Record<string, string>> = {
   off: 'hide Clawd (remembered)',
   autopick: 'switch the model picker on or off; now picks once; haiku (default), sonnet or opus sets its model',
   trace: 'switch writing each autopick to a file on or off',
-  debug: "switch showing each autopick's whole reply here on or off",
+  debug: "switch showing each autopick's request and whole reply here on or off",
 }
 /**
- * What `/clawd emote` takes besides an emote's name (user, 2026-10-07: all
- * emote work under `/clawd emote`). No emote may take one of these names.
+ * Acts, emotes and skins take the same four commands, create, change, delete
+ * and preview; a skin has auto and none besides. No act, emote or
+ * skin may take one of these names.
+ */
+export type MadeKind = 'act' | 'emote' | 'skin'
+/** What `/clawd act` takes besides an act's name. change and delete take a made act only: a built-in act is code. */
+export const ACT_COMMANDS: Readonly<Record<string, string>> = {
+  create: 'a model writes a new act (uses your Claude usage)',
+  change: "a model changes a made act's steps, or with no words writes it again from scratch (uses your Claude usage); edit and modify work too",
+  delete: 'remove a made act; the file goes to acts/old/',
+  preview: 'a PNG of an act, the band every half second while it plays',
+}
+/**
+ * What `/clawd emote` takes besides an emote's name.
  */
 export const EMOTE_COMMANDS: Readonly<Record<string, string>> = {
   create: 'a model draws a new emote (uses your Claude usage)',
-  change: "a model changes an emote's look (uses your Claude usage); edit and modify work too",
+  change: "a model changes an emote's look, or with no words draws it again from scratch (uses your Claude usage); edit and modify work too",
   delete: 'remove an emote; the file goes to emotes/old/',
   preview: 'a PNG of an emote in every pose',
 }
-/**
- * What `/clawd skin` takes besides a skin's name (user, 2026-10-08: skins
- * apart from emotes). No skin may take one of these names.
- */
+/** What `/clawd skin` takes besides a skin's name. */
 export const SKIN_COMMANDS: Readonly<Record<string, string>> = {
   auto: 'the skin clawd.json or the project folder gives; the default',
   none: "Clawd's own body for this session",
   create: 'a model draws a new skin (uses your Claude usage)',
-  change: "a model changes a skin's look (uses your Claude usage); edit and modify work too",
+  change: "a model changes a skin's look, or with no words draws it again from scratch (uses your Claude usage); edit and modify work too",
   delete: 'remove a skin; the file goes to skins/old/',
   preview: 'a PNG of a skin in every pose',
 }
@@ -56,15 +63,11 @@ export const LIST_KINDS = {
 export type ListKind = keyof typeof LIST_KINDS
 /** Other words for commands, taken only in full and never offered. */
 export const ALIASES: Readonly<Record<string, string>> = { '?': 'help', ls: 'list', edit: 'change', modify: 'change' }
-const WHAT: Readonly<Record<string, string>> = { ...COMMANDS, ...EMOTE_COMMANDS }
+const A: Record<MadeKind, string> = { act: 'an act', emote: 'an emote', skin: 'a skin' }
 /** Commands that start a model run or remove something run only when typed in full, with why. */
-const IN_FULL: Readonly<Record<string, string>> = {
-  create: 'it starts a model run',
-  change: 'it starts a model run',
-  delete: 'it removes an emote',
+function inFull(verb: string, kind: MadeKind): string {
+  return verb === 'create' || verb === 'change' ? 'it starts a model run' : verb === 'delete' ? `it removes ${A[kind]}` : ''
 }
-/** Commands whose emote or skin must be named in full. */
-const WHOLE_EMOTE = ['change', 'delete']
 
 export type Kind = 'command' | 'mini' | 'emote' | 'skin' | 'made' | 'act'
 /** The names a word may take now, each with a short description, in the order offered. */
@@ -74,6 +77,7 @@ export type Names = {
   skins: Readonly<Record<string, string>>
   made: Readonly<Record<string, string>>
   acts: Readonly<Record<string, string>>
+  isSkinOnly?: boolean // clawd.json names a skin, so Clawd has no body of its own: /clawd skin has no none
 }
 export type Fit = { kind: Kind; name: string; what: string }
 
@@ -82,15 +86,14 @@ const TABLES = { mini: 'minis', emote: 'emotes', skin: 'skins', made: 'made', ac
 const KIND_WORD: Record<Kind, string> = { command: '', mini: '', emote: 'emote', skin: 'skin', made: 'made act', act: 'act' }
 const FIRST: Kind[] = ['command', 'mini', 'emote', 'made', 'act']
 const PLAYS: Kind[] = ['act', 'made']
-const LIST_ROWS: Fit[] = Object.entries(LIST_KINDS).map(([name, what]) => ({ kind: 'command', name, what }))
-const EMOTE_ROWS: Fit[] = Object.entries(EMOTE_COMMANDS).map(([name, what]) => ({ kind: 'command', name, what }))
-const SKIN_ROWS: Fit[] = Object.entries(SKIN_COMMANDS).map(([name, what]) => ({ kind: 'command', name, what }))
+const rowsOf = (rows: Readonly<Record<string, string>>): Fit[] => Object.entries(rows).map(([name, what]) => ({ kind: 'command', name, what }))
+const LIST_ROWS: Fit[] = rowsOf(LIST_KINDS)
 const TRACE_ROWS: Fit[] = [
   { kind: 'command', name: 'on', what: 'write each autopick to a file' },
   { kind: 'command', name: 'off', what: 'stop writing the autopicks' },
 ]
 const DEBUG_ROWS: Fit[] = [
-  { kind: 'command', name: 'on', what: "each autopick's reply, tokens and outcome in the transcript, not sent to the model" },
+  { kind: 'command', name: 'on', what: "each autopick's request, reply, tokens and outcome in the transcript, not sent to the model" },
   { kind: 'command', name: 'off', what: 'stop showing them' },
 ]
 const AUTOPICK_ROWS: Fit[] = [
@@ -115,8 +118,8 @@ function table(kinds: readonly Kind[], names: Names): Fit[] {
 /** The names a typed word fits: the name itself, else the names it starts, else those it is part of. */
 export function fitsOf(word: string, rows: readonly Fit[]): Fit[] {
   const w = word.toLowerCase()
-  const alias = ALIASES[w]
-  if (alias && rows.some(f => f.kind === 'command' && f.name === alias)) return [{ kind: 'command', name: w, what: WHAT[alias] ?? '' }]
+  const alias = rows.find(f => f.kind === 'command' && f.name === ALIASES[w])
+  if (alias) return [{ kind: 'command', name: w, what: alias.what }]
   const exact = rows.filter(f => f.name === w)
   if (exact.length > 0) return exact
   const starts = rows.filter(f => f.name.startsWith(w))
@@ -128,14 +131,51 @@ export function namesFit(word: string, kinds: readonly Kind[], names: Names): Fi
   return fitsOf(word, table(kinds, names))
 }
 
-/** After `/clawd emote`: its commands, then the emotes. */
-function emoteRows(names: Names): Fit[] {
-  return [...EMOTE_ROWS, ...table(['emote'], names)]
+/** How `/clawd act`, `/clawd emote` and `/clawd skin` read the words after them. */
+type KindWords = {
+  verbs: Fit[] // the commands, offered before the names
+  names: readonly Kind[] // what `/clawd <kind> <name>` and preview take
+  owned: Kind // what change and delete take: the ones a file holds
+  ownedOf: string // those, as the menu names them
+  ownedList: ListKind // the `/clawd list` kind that names them
+  create: string // what follows create's new name
+  change: string // what follows change's name
 }
+const KIND_WORDS: Record<MadeKind, KindWords> = {
+  act: {
+    verbs: rowsOf(ACT_COMMANDS),
+    names: PLAYS,
+    owned: 'made',
+    ownedOf: 'made acts',
+    ownedList: 'made',
+    create: '[what it does; else the name says it]',
+    change: '[what to change; nothing writes it again]',
+  },
+  emote: {
+    verbs: rowsOf(EMOTE_COMMANDS),
+    names: ['emote'],
+    owned: 'emote',
+    ownedOf: 'emotes',
+    ownedList: 'emotes',
+    create: '[image path] [what it looks like; else the name says it]',
+    change: '[image path] [what to change; nothing draws it again]',
+  },
+  skin: {
+    verbs: rowsOf(SKIN_COMMANDS),
+    names: ['skin'],
+    owned: 'skin',
+    ownedOf: 'skins',
+    ownedList: 'skins',
+    create: '[image path] [what it looks like; else the name says it]',
+    change: '[image path] [what to change; nothing draws it again]',
+  },
+}
+const LISTED: Record<MadeKind, ListKind> = { act: 'acts', emote: 'emotes', skin: 'skins' }
 
-/** After `/clawd skin`: auto, none and its commands, then the skins. */
-function skinRows(names: Names): Fit[] {
-  return [...SKIN_ROWS, ...table(['skin'], names)]
+/** After `/clawd act`, `emote` or `skin`: its commands (a skin's none only without isSkinOnly), then the names. */
+function kindRows(kind: MadeKind, names: Names): Fit[] {
+  const words = KIND_WORDS[kind]
+  return [...words.verbs.filter(row => !(row.name === 'none' && names.isSkinOnly)), ...table(words.names, names)]
 }
 
 function onlyFit(word: string, rows: readonly Fit[]): Fit | undefined {
@@ -154,16 +194,15 @@ function placeAfter(before: readonly string[], names: Names): Place {
   const fit = onlyFit(first, table(FIRST, names))
   if (!fit) return END
   const name = ALIASES[fit.name] ?? fit.name
-  // After a mini or `act`: an act, then how many times.
-  if (fit.kind === 'mini' || (fit.kind === 'command' && name === 'act')) {
+  // After a mini: an act, then how many times. A mini takes no commands.
+  if (fit.kind === 'mini') {
     const [act] = rest
     if (act === undefined) return { rows: table(PLAYS, names), of: 'acts' }
     return rest.length === 1 && onlyFit(act, table(PLAYS, names)) ? COUNT : END
   }
   if (fit.kind === 'act' || fit.kind === 'made') return rest.length === 0 ? COUNT : END
   if (fit.kind !== 'command') return END
-  if (name === 'emote') return emotePlace(rest, names)
-  if (name === 'skin') return skinPlace(rest, names)
+  if (name === 'act' || name === 'emote' || name === 'skin') return kindPlace(name, rest, names)
   if (rest.length > 0) return END
   if (name === 'list') return { rows: LIST_ROWS, of: 'kinds' }
   if (name === 'trace') return { rows: TRACE_ROWS, of: 'words' }
@@ -173,29 +212,24 @@ function placeAfter(before: readonly string[], names: Names): Place {
   return END
 }
 
-/** What comes after `/clawd emote` and these words: a command or an emote, then the command's words. */
-function emotePlace(rest: readonly string[], names: Names): Place {
+/**
+ * What comes after `/clawd act`, `emote` or `skin` and these words: a command
+ * or a name; after a command its words, after an act's name how many times.
+ */
+function kindPlace(kind: MadeKind, rest: readonly string[], names: Names): Place {
+  const words = KIND_WORDS[kind]
   const [first, ...more] = rest
-  if (first === undefined) return { rows: emoteRows(names), of: 'names' }
-  const fit = onlyFit(first, emoteRows(names))
-  if (!fit || fit.kind !== 'command') return END
-  const verb = ALIASES[fit.name] ?? fit.name
-  if (verb === 'create') return more.length === 0 ? { free: '<new_name> in snake_case' } : { free: '[image path] <what it looks like>' }
-  if (more.length === 0) return { rows: table(['emote'], names), of: 'emotes' }
-  return verb === 'change' ? { free: '[image path] <what to change>' } : END
-}
-
-/** What comes after `/clawd skin` and these words: auto, none, a command or a skin, then the command's words. */
-function skinPlace(rest: readonly string[], names: Names): Place {
-  const [first, ...more] = rest
-  if (first === undefined) return { rows: skinRows(names), of: 'names' }
-  const fit = onlyFit(first, skinRows(names))
-  if (!fit || fit.kind !== 'command') return END
+  if (first === undefined) return { rows: kindRows(kind, names), of: 'names' }
+  const fit = onlyFit(first, kindRows(kind, names))
+  if (!fit) return END
+  if (fit.kind !== 'command') return kind === 'act' && more.length === 0 ? COUNT : END
   const verb = ALIASES[fit.name] ?? fit.name
   if (verb === 'auto' || verb === 'none') return END
-  if (verb === 'create') return more.length === 0 ? { free: '<new_name> in snake_case' } : { free: '[image path] <what it looks like>' }
-  if (more.length === 0) return { rows: table(['skin'], names), of: 'skins' }
-  return verb === 'change' ? { free: '[image path] <what to change>' } : END
+  if (verb === 'create') return more.length === 0 ? { free: '<new_name> in snake_case' } : { free: words.create }
+  if (more.length === 0) {
+    return verb === 'preview' ? { rows: table(words.names, names), of: LISTED[kind] } : { rows: table([words.owned], names), of: words.ownedOf }
+  }
+  return verb === 'change' ? { free: words.change } : END
 }
 
 type Word = { text: string; start: number; end: number }
@@ -229,7 +263,8 @@ export type Menu = {
   next: string // what follows the fitting names: `then [1-5] times in a row`
 }
 
-const rank = (f: Fit): number => FIRST.indexOf(f.kind)
+// Skins are not in FIRST: they sort after the commands, as emotes and acts do.
+const rank = (f: Fit): number => (FIRST.includes(f.kind) ? FIRST.indexOf(f.kind) : FIRST.length)
 
 /** What comes after these words, when it is short to say: a count or a free text. */
 function nextAfter(before: readonly string[], names: Names): string {
@@ -345,68 +380,54 @@ function unclear(text: string): Order {
   return { kind: 'unclear', text }
 }
 
-/** `who` plays the act named by rest[0], rest[1] times. */
-function actOrder(who: string, rest: readonly string[], names: Names): Order {
+/** A mini plays the act named by rest[0], rest[1] times. */
+function miniOrder(who: string, rest: readonly string[], names: Names): Order {
   const [act, n] = rest
-  const how = who === 'clawd' ? '/clawd act' : `/clawd ${who}`
-  if (act === undefined) return unclear(`Clawd: which act? E.g. ${how} wave. /clawd list acts shows them.`)
+  if (act === undefined) return unclear(`Clawd: which act? E.g. /clawd ${who} wave. /clawd list acts shows them.`)
   const what = oneFit(act, table(PLAYS, names), '/clawd list acts')
   if (typeof what !== 'string') return { kind: 'play', who, fit: what, count: countOf(n) }
-  const look = onlyFit(act, table(['emote'], names))
-  if (!look) return unclear(what)
-  return unclear(
-    who === 'clawd'
-      ? `Clawd: ${look.name} is an emote; /clawd emote ${look.name} plays it.`
-      : `Clawd: emotes are for Clawd only, not for ${who}.`,
-  )
-}
-
-/** `/clawd emote <emote>` plays it; `/clawd emote <command> ...` creates, changes, deletes or previews one. */
-function emoteOrder(rest: readonly string[], names: Names): Order {
-  const [first, ...more] = rest
-  if (first === undefined) {
-    return unclear('Clawd: which emote? /clawd emote <emote> plays one; emote create, change, delete and preview work on them. /clawd list emotes shows them.')
-  }
-  const fit = oneFit(first, emoteRows(names), '/clawd list emotes')
-  if (typeof fit === 'string') return unclear(fit)
-  if (fit.kind === 'emote') return { kind: 'play', who: 'clawd', fit, count: 1 }
-  const verb = ALIASES[fit.name] ?? fit.name
-  const reason = IN_FULL[verb]
-  if (reason && first !== fit.name) return unclear(`Clawd: type ${verb} in full; ${reason}.`)
-  if (WHOLE_EMOTE.includes(verb)) {
-    const [look] = more
-    if (look === undefined) return unclear(`Clawd: which emote? /clawd emote ${verb} <emote>${verb === 'change' ? ' <what to change>' : ''}.`)
-    if (!(look in names.emotes)) {
-      const one = onlyFit(look, table(['emote'], names))
-      return unclear(one ? `Clawd: type the emote's full name: /clawd emote ${verb} ${one.name}.` : `Clawd: there is no emote ${look}. /clawd list emotes shows them.`)
-    }
-  }
-  return { kind: 'command', name: verb, rest: more }
+  return unclear(onlyFit(act, table(['emote'], names)) ? `Clawd: emotes are for Clawd only, not for ${who}.` : what)
 }
 
 /**
- * `/clawd skin <skin>|auto|none` chooses Clawd's body for the session; `/clawd
- * skin <command> ...` creates, changes, deletes or previews a skin. The order
- * is the skin command with the skin's or the command's full name first.
+ * `/clawd act <act> [n]` plays an act, `/clawd emote <emote>` an emote, and
+ * `/clawd skin <skin>|auto|none` chooses Clawd's body for the session.
+ * `/clawd <kind> <command> ...` creates, changes, deletes or previews one of
+ * them; the order is the kind with the command's full name first. change and
+ * delete take the full name of one a file holds, so an act's must be a made one.
  */
-function skinOrder(rest: readonly string[], names: Names): Order {
+function kindOrder(kind: MadeKind, rest: readonly string[], names: Names): Order {
+  const words = KIND_WORDS[kind]
   const [first, ...more] = rest
-  if (first === undefined) return { kind: 'command', name: 'skin', rest: [] }
-  const fit = oneFit(first, skinRows(names), '/clawd list skins')
-  if (typeof fit === 'string') return unclear(fit)
+  if (first === undefined) {
+    if (kind === 'skin') return { kind: 'command', name: 'skin', rest: [] }
+    return unclear(`Clawd: which ${kind}? /clawd ${kind} <${kind}> plays one; ${kind} create, change, delete and preview work on them. /clawd list ${LISTED[kind]} shows them.`)
+  }
+  const fit = oneFit(first, kindRows(kind, names), `/clawd list ${LISTED[kind]}`)
+  if (typeof fit === 'string') {
+    const look = kind === 'act' ? onlyFit(first, table(['emote'], names)) : undefined
+    return unclear(look ? `Clawd: ${look.name} is an emote; /clawd emote ${look.name} plays it.` : fit)
+  }
   if (fit.kind === 'skin') return { kind: 'command', name: 'skin', rest: [fit.name] }
+  if (fit.kind !== 'command') return { kind: 'play', who: 'clawd', fit, count: kind === 'act' ? countOf(more[0]) : 1 }
   const verb = ALIASES[fit.name] ?? fit.name
-  const reason = verb === 'delete' ? 'it removes a skin' : IN_FULL[verb]
+  const reason = inFull(verb, kind)
   if (reason && first !== fit.name) return unclear(`Clawd: type ${verb} in full; ${reason}.`)
-  if (WHOLE_EMOTE.includes(verb)) {
-    const [look] = more
-    if (look === undefined) return unclear(`Clawd: which skin? /clawd skin ${verb} <skin>${verb === 'change' ? ' <what to change>' : ''}.`)
-    if (!(look in names.skins)) {
-      const one = onlyFit(look, table(['skin'], names))
-      return unclear(one ? `Clawd: type the skin's full name: /clawd skin ${verb} ${one.name}.` : `Clawd: there is no skin ${look}. /clawd list skins shows them.`)
+  if (verb === 'change' || verb === 'delete') {
+    const [name] = more
+    if (name === undefined) return unclear(`Clawd: which ${kind}? /clawd ${kind} ${verb} <${kind}>${verb === 'change' ? ' [what to change]' : ''}.`)
+    const owned = table([words.owned], names)
+    if (!owned.some(f => f.name === name)) {
+      if (kind === 'act' && Object.hasOwn(names.acts, name)) {
+        return unclear(`Clawd: ${name} is built in; only made acts can be ${verb === 'change' ? 'changed' : 'deleted'}. /clawd list made shows them.`)
+      }
+      const one = onlyFit(name, owned)
+      return unclear(
+        one ? `Clawd: type the ${kind}'s full name: /clawd ${kind} ${verb} ${one.name}.` : `Clawd: there is no ${kind} ${name}. /clawd list ${words.ownedList} shows them.`,
+      )
     }
   }
-  return { kind: 'command', name: 'skin', rest: [verb, ...more] }
+  return { kind: 'command', name: kind, rest: [verb, ...more] }
 }
 
 /** The words after `/clawd`, read as one order. `clawd` as the first word names Clawd, as a mini id names that mini. */
@@ -416,20 +437,18 @@ export function orderOf(args: readonly string[], names: Names): Order {
   if (first === undefined) return { kind: 'status' }
   const fit = oneFit(first, table(FIRST, names), '/clawd help')
   if (typeof fit === 'string') {
-    // These were top-level commands until 2026-10-07.
+    // These were top-level emote commands until 2026-10-07; acts, emotes and skins take them now.
     const verb = ALIASES[first] ?? first
-    if (verb in EMOTE_COMMANDS) return unclear(`Clawd: that is /clawd emote ${verb} now.`)
+    if (Object.hasOwn(ACT_COMMANDS, verb)) return unclear(`Clawd: ${verb} what? /clawd act ${verb}, /clawd emote ${verb} or /clawd skin ${verb}.`)
     // A skin is no act: it is worn all session, so it takes the skin command.
     const skin = fitsOf(first, table(FIRST, names)).length === 0 ? onlyFit(first, table(['skin'], names)) : undefined
     return unclear(skin ? `Clawd: ${skin.name} is a skin; /clawd skin ${skin.name} puts it on for this session.` : fit)
   }
   if (fit.kind === 'act' || fit.kind === 'made') return { kind: 'play', who: 'clawd', fit, count: countOf(rest[0]) }
   if (fit.kind === 'emote') return { kind: 'play', who: 'clawd', fit, count: 1 }
-  if (fit.kind === 'mini') return actOrder(fit.name, rest, names)
+  if (fit.kind === 'mini') return miniOrder(fit.name, rest, names)
   const name = ALIASES[fit.name] ?? fit.name
-  if (name === 'act') return actOrder('clawd', rest, names)
-  if (name === 'emote') return emoteOrder(rest, names)
-  if (name === 'skin') return skinOrder(rest, names)
+  if (name === 'act' || name === 'emote' || name === 'skin') return kindOrder(name, rest, names)
   if (name === 'list') {
     const [of] = rest
     if (of === undefined) return unclear('Clawd: list what? /clawd list acts | made | emotes | skins | minis.')
