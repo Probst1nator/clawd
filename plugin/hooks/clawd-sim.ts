@@ -64,6 +64,7 @@ const QUAD = [
 type Shape = 'normal' | 'squash' | 'stretch' | 'flat'
 type Arms = 'out' | 'up' | 'down' | 'wave' | 'flail' | 'none'
 type Eyes = 'open' | 'closed' | 'wide' | 'down' // down: reading, at the scroll; no routine or emote sets it
+type Leg = 'down' | 'up' | 'out' // the front leg: up drawn away, out kicked forward along the floor; only the kick sets it
 type Size = { w: number; h: number; eyes: [number, number]; eyeRow: number; armRow: number }
 
 // Body sizes in sub-pixels. `normal` is the logo: 12 x 4 with eye holes at
@@ -284,6 +285,7 @@ export type Body = {
   lookUp: boolean
   shape: Shape | null
   sitting: boolean
+  frontLeg: Leg
   reading: boolean // holds a scroll
   carrying: boolean
   wearing: Emote | null // the emote whose look it has
@@ -360,6 +362,7 @@ function newBody(id: string, color: number, isMini: boolean, x: number): Body {
     lookUp: false,
     shape: null,
     sitting: false,
+    frontLeg: 'down',
     reading: false,
     carrying: false,
     wearing: null,
@@ -1084,11 +1087,22 @@ export function step(w: World): void {
     c.lookUp = false
     c.shape = null
     c.sitting = false
+    c.frontLeg = 'down'
     c.reading = false
     if (!isAirborne(c)) c.vx = 0
-    const act = (c.act ??= nextAct(w, c))
-    if (isBigJump(act)) w.tallUntil = w.t + TALL_HOLD_S
-    if (runAct(w, c, act)) c.act = null
+    const isNew = c.act === null
+    let act = (c.act ??= nextAct(w, c))
+    // An act that ends in the tick it starts (a mark, sparks, a routine or
+    // another macro) hands the tick on to the next queued act, so no frame
+    // shows the neutral pose between two steps. A random act waits for the
+    // next tick, so a finished routine still leaves the body free for a tick.
+    for (let n = 0; ; n++) {
+      if (isBigJump(act)) w.tallUntil = w.t + TALL_HOLD_S
+      const isDone = runAct(w, c, act)
+      if (isDone) c.act = null
+      if (!isDone || !isNew || c.queue.length === 0 || n >= 4 * MAX_STEPS) break
+      act = c.act = nextAct(w, c)
+    }
     overlay(c, act)
     physics(w, c)
     if (c.wearing?.prop) moveProp(w, c, c.wearing.prop)
@@ -1167,12 +1181,12 @@ function eased(speed: number, e: number, gap: number, isStart: boolean, isEnd: b
 /** Moves towards `to`; true once there. */
 function moveTo(c: Body, to: number, speed: number): boolean {
   const gap = to - c.x
+  c.look = 1 // on the arriving tick too, so the eyes do not snap to the middle for a frame
   if (Math.abs(gap) <= speed * DT) {
     c.x = to
     return true
   }
   c.vx = Math.sign(gap) * speed
-  c.look = 1
   return false
 }
 
@@ -1221,7 +1235,7 @@ function runAct(w: World, c: Body, a: Act): boolean {
           c.x = a.dir < 0 ? W + 14 : -14
           nextStage(w, a)
         }
-        return go(a.to, false, true)
+        return go(a.to ?? c.x, false, true) // stage 0 set a.to; the type cannot tell on later ticks
       }
       if (a.to === undefined) {
         a.to =
@@ -1350,7 +1364,11 @@ function runAct(w: World, c: Body, a: Act): boolean {
     }
     case 'think': {
       a.dur ??= between(w, 1.6, 2.6)
-      if (e === 0) mark(w, c, '?', WHITE)
+      // A mark fades after 0.9 s; a new ? before then keeps one over the head while it thinks.
+      if (e >= (a.next ?? 0)) {
+        mark(w, c, '?', WHITE)
+        a.next = e + 0.8
+      }
       c.lookUp = true
       c.arms = 'down'
       return e > a.dur
@@ -1451,6 +1469,12 @@ function runAct(w: World, c: Body, a: Act): boolean {
       return true
     }
     case 'kick': {
+      if (a.stage === 2) {
+        // The leg stays out at the pile a moment, arms up.
+        c.frontLeg = 'out'
+        c.arms = 'up'
+        return e > 0.35
+      }
       if (w.pile === 0) return true
       if (a.stage === 0) {
         const side = c.x < w.pileAt + 8 ? w.pileAt - 7 : w.pileAt + 16 + 7
@@ -1459,9 +1483,10 @@ function runAct(w: World, c: Body, a: Act): boolean {
         nextStage(w, a)
         return false
       }
-      c.shape = 'stretch'
-      c.arms = 'up'
-      if (e < 0.15) return false
+      // The wind-up: the front leg comes up, then swings out into the pile.
+      c.frontLeg = 'up'
+      if (e < 0.2) return false
+      c.frontLeg = 'out'
       for (let k = 0; k < w.pile; k++) {
         const spot = brickSpot(w, k)
         if (!spot) continue
@@ -1473,7 +1498,8 @@ function runAct(w: World, c: Body, a: Act): boolean {
         }
       }
       w.pile = 0
-      return true
+      nextStage(w, a)
+      return false
     }
     case 'routine': {
       c.queue.unshift(...stepActs(w, a))
@@ -1875,7 +1901,9 @@ function drawWorn(w: World, c: Body, look: Skin, put: Put): void {
     for (const [hx, ey] of eyePixels) {
       const hy = down ? ey + 1 : ey
       holes.add(`${hx},${hy}`)
-      if (eyes === 'wide') holes.add(`${hx},${hy > 0 ? hy - 1 : hy + 1}`)
+      // Wide open, as on Clawd's own body: a pixel down or up, never through the outline.
+      const wider = isBody(rows[hy + 2]?.[hx]) ? hy + 1 : isBody(rows[hy - 2]?.[hx]) ? hy - 1 : -1
+      if (eyes === 'wide' && wider >= 0 && isBody(rows[wider]?.[hx])) holes.add(`${hx},${wider}`)
     }
   }
   // The lean moves the rows above the eyes, so it never splits an eye.
@@ -1919,6 +1947,12 @@ function drawWorn(w: World, c: Body, look: Skin, put: Put): void {
     }
   }
 
+  // A kick, as on Clawd's own body: the front leg up, then out along the floor.
+  if (c.frontLeg !== 'down' && legLen > 0 && legs.length > 0) {
+    const front = Math.max(...legs)
+    legs = legs.filter(lx => lx !== front)
+    if (c.frontLeg === 'out') for (let lx = front + 1; lx <= sw + 1; lx++) at(lx, h - 1 + legLen, look.color)
+  }
   legs.forEach((lx, k) => {
     const side = lx < sw / 2 ? -1 : 1
     const len = lifted(k) ? legLen - 1 : legLen // a lifted tip is not drawn
@@ -2000,7 +2034,10 @@ function drawBody(w: World, c: Body, put: Put): void {
       const hx = ex + Math.max(-1, Math.min(1, c.look))
       const hy = c.lookUp && s.eyeRow > 0 ? s.eyeRow - 1 : isDown ? s.eyeRow + 1 : s.eyeRow
       holes.add(`${hx},${hy}`)
-      if (eyes === 'wide') holes.add(`${hx},${hy > 0 ? hy - 1 : hy + 1}`)
+      // Wide open, an eye grows a pixel down, or up, where a row of body stays
+      // beyond it, so it never cuts the outline; in a body too flat for that it stays a pixel.
+      const wider = hy + 2 < s.h ? hy + 1 : hy > 1 ? hy - 1 : -1
+      if (eyes === 'wide' && wider >= 0) holes.add(`${hx},${wider}`)
     }
   }
   for (let r = 0; r < s.h; r++) {
@@ -2016,11 +2053,19 @@ function drawBody(w: World, c: Body, put: Put): void {
   const UP: [number, number][] = c.isMini ? [[1, -1]] : [[1, -1], [2, -2]]
   const DOWN: [number, number][] = [[1, 1]]
   const RAISED: [number, number][] = c.isMini ? [[1, 0]] : [[1, -1], [1, -2]]
+  // Clawd waves with the hand over its head, swinging from above the head's
+  // edge out and back about twice a second. A mini's arm is one pixel, and a hand holding a tool
+  // stays low so the tool stays in the band: both flip as before.
+  const isLow = c.isMini || Boolean(c.wearing?.tool)
+  const WAVE: [number, number][][] = isLow
+    ? [RAISED, UP]
+    : [[[1, -1], [1, -2], [0, -3]], [[1, -1], [1, -2], [1, -3]], [[1, -1], [2, -2], [3, -3]], [[1, -1], [1, -2], [1, -3]]]
+  const waving = WAVE[isLow ? Number(flip) : Math.floor(w.t * 8) % WAVE.length] ?? RAISED
   let back: [number, number][] = OUT
   let front: [number, number][] = OUT
   if (c.arms === 'up') back = front = UP
   else if (c.arms === 'down') back = front = DOWN
-  else if (c.arms === 'wave') front = flip ? UP : RAISED
+  else if (c.arms === 'wave') front = waving
   else if (c.arms === 'flail') [back, front] = flip ? [UP, DOWN] : [DOWN, UP]
   else if (c.arms === 'none') back = front = []
   for (const [dx, dy] of back) at(-dx, s.armRow + dy, c.color)
@@ -2032,6 +2077,12 @@ function drawBody(w: World, c: Body, put: Put): void {
     drawScroll(c, left, s.w, s.w - 1 + OUT.length, rows, at)
   }
 
+  // A kick takes the front leg up, then out along the floor past the front edge.
+  if (c.frontLeg !== 'down' && legLen > 0) {
+    const front = Math.max(...legs)
+    legs = legs.filter(lx => lx !== front)
+    if (c.frontLeg === 'out') for (let lx = front + 1; lx <= s.w + 1; lx++) at(lx, s.h - 1 + legLen, c.color)
+  }
   for (const lx of legs) {
     for (let r = 1; r <= legLen; r++) at(lx, s.h - 1 + r, c.color)
   }

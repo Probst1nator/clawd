@@ -316,8 +316,9 @@ test('an emote step puts on a look and the act goes on in it; a play step plays 
   w.act = { kind: 'idle', t0: 0, stage: 0, dur: 99, next: 99, look: 0 }
   perform(w, linked)
   step(w)
-  // Each act knows its step; the played act's acts name it. An emote that is not there plays nothing.
-  expect(w.queue.map(a => [a.kind, a.step, a.via ?? ''])).toEqual([
+  // The routine hands its tick to its first step. Each act knows its step; the played act's acts
+  // name it. An emote that is not there plays nothing.
+  expect([w.act, ...w.queue].map(a => [a?.kind, a?.step, a?.via ?? ''])).toEqual([
     ['emote', 1, ''],
     ['hop', 2, 'inner'],
     ['wave', 2, 'inner'],
@@ -334,6 +335,21 @@ test('an emote step puts on a look and the act goes on in it; a play step plays 
   for (let i = 0; i < 20 * 5 && (w.act?.routine === 'outer' || w.queue.some(a => a.routine === 'outer')); i++) step(w)
   expect(w.queue.some(a => a.routine === 'outer')).toBe(false)
   expect(w.wearing?.name).toBe('octo')
+})
+
+test('a step that takes no time hands its tick to the next one, so a sitting pose holds through a mark', () => {
+  const w = createWorld(40, 5, seeded(6))
+  w.queue = []
+  w.x = 30
+  const doze = { do: 'pose', sit: true, eyes: 'closed', dur: 0.5 }
+  perform(w, routineFrom({ name: 'doze', title: 'doze', steps: [doze, { do: 'mark', glyph: 'z' }, doze] }) as Routine)
+  const seen: string[] = []
+  for (let i = 0; i < 20; i++) {
+    step(w)
+    seen.push(`${w.sitting} ${w.eyes}`)
+  }
+  expect(seen.filter(s => s !== 'true closed')).toEqual([])
+  expect(w.particles.some(p => p.glyph === 'z')).toBe(true)
 })
 
 test('the picker asks for a new act and plays it before it exists, Opus writes it, the band shows it, and the trace and debug keep the pick', async ($, on) => {
@@ -605,6 +621,7 @@ test('the band above the prompt holds Clawd, animated by blits, a row taller for
     return { value: undefined }
   })
   on('command.register', async ($, e) => ({ value: { command: e.name } }))
+  on('tool.register', async ($, e) => ({ value: { tool: `mcp__clawd__${e.name}` } }))
   on('ui.blit', async ($, e) => {
     if ('cells' in e) blits.push(e.cells)
     return { value: {} }
@@ -2210,4 +2227,96 @@ test('while Remote Control is on, the autopicker pauses and its setting stays on
   await clock.advance(70_000) // a 1 s poll, then a pick within 10 to 60 s
   expect(triggers.length).toBeGreaterThan(1)
   expect((await run(''))?.text).not.toContain('paused')
+})
+
+test("the session's model runs /clawd commands through the clawd tool behind ToolSearch; its calls stack no brick, and a create it starts waits for the daily limit", async ($, on) => {
+  const clock = mock.clock(on, { now: 1_700_000_000_000 })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/t', CLAUDE_CLAWD_SEED: '7' })
+  const data = '/home/t/.claude/clawd'
+  const files = new Map<string, string>()
+  const registered: { name: string; isDeferred?: unknown; inputSchema?: unknown }[] = []
+  const prompts: string[] = []
+  const usage = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+  on('ui.log', async () => ({ value: undefined }))
+  on('ui.toast', async () => ({ value: undefined }))
+  on('command.register', async ($, e) => ({ value: { command: e.name } }))
+  on('tool.register', async ($, e) => {
+    registered.push(e)
+    return { value: { tool: `mcp__clawd__${e.name}` } }
+  })
+  on('tool.call', async () => ({ result: 'edited' }))
+  on('ui.blit', async () => ({ value: {} }))
+  on('process.run', async () => ({ value: { exitCode: 0, stdout: 'Sat 17:00\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('fs.stat', async ($, e) => ({ value: { kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false, realPath: e.path } }))
+  on('fs.list', async ($, e) => ({
+    value: [...files.keys()]
+      .filter(p => p.startsWith(`${e.path}/`) && !p.slice(e.path.length + 1).includes('/'))
+      .map(p => ({ name: p.slice(e.path.length + 1), kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false })),
+  }))
+  on('fs.read', async ($, e) => ({ value: files.get(e.path) ?? '' }))
+  on('fs.write', async ($, e) => {
+    files.set(e.path, e.text)
+    return { value: undefined }
+  })
+  on('session.id', async () => ({ value: 'sess-1' }))
+  on('model.complete', async ($, e) => {
+    prompts.push(e.prompt)
+    const text = e.model === 'haiku' ? '{"summary": "", "calls": [], "why": "", "new": null}' : '{"steps": [{"do": "hop", "n": 2}]}'
+    return { value: { isAnswered: true as const, text, usage } }
+  })
+  on('session.start', async ($, e) => ({ cwd: e.cwd }))
+  on('ui.render', async ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return h(Text, { dimColor: true }, 'engine band') as RenderElement
+  })
+
+  await $.session.start({ cwd: '/home/t/proj', surface: 'terminal', isInteractive: true })
+  await $.ui.mount({
+    plugin: 'clawd',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 100, scroll: { offset: 0, bodyRows: 20 }, view: {} },
+    viewport: { columns: 100, rows: 40 },
+  })
+  await clock.advance(200)
+  const run = (args: string) =>
+    $.command.run({ command: 'clawd', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+  // The tool is not in the engine's list of tool names until the mod has loaded once, hence the cast.
+  const tool = async (command: string) => {
+    const r = await $.tool.call({ tool: 'mcp__clawd__clawd', command } as never)
+    return 'result' in r ? r.result : r
+  }
+
+  // One tool, its schema loaded when a model asks for it (the engine's default).
+  expect(registered.map(t => [t.name, t.isDeferred])).toEqual([['clawd', undefined]])
+  expect(registered[0]?.inputSchema).toMatchObject({ required: ['command'] })
+
+  // It answers as /clawd does, with or without the leading /clawd.
+  expect(await tool('act jump 2')).toBe('Clawd: jump ×2.')
+  expect(await tool('/clawd wave')).toBe('Clawd: wave.')
+  expect(await tool('list minis')).toBe(((await run('list minis'))?.text ?? '') as string)
+  expect(await tool('frog')).toBe('Clawd: nothing is called "frog". /clawd help shows what there is.')
+  await clock.advance(100)
+  expect(await tool('')).toContain('Clawd on: wave')
+  expect(await tool('help uml')).not.toContain('lines wrap')
+
+  // Its own calls are no work: the picker reads the other tool's call and not the clawd tool's.
+  await $.tool.call({ tool: 'Write', file_path: '/home/t/proj/a.txt', content: 'x' } as never)
+  await run('autopick now')
+  await clock.advance(10)
+  expect(prompts.at(-1)).toContain('tool Write ok: /home/t/proj/a.txt')
+  expect(prompts.at(-1)).not.toContain('mcp__clawd__clawd')
+
+  // A create or change the model starts waits for the daily limit; the person's typed one does not.
+  const made = new Date(1_700_000_000_000 - 3600_000).toISOString()
+  for (const name of ['spin_one', 'spin_two', 'spin_three', 'spin_four', 'spin_five']) {
+    files.set(`${data}/acts/${name}.json`, JSON.stringify({ name, title: name, steps: [{ do: 'hop' }], made, project: 'proj', why: '' }))
+  }
+  const refused = 'Clawd: 5 acts, emotes and skins were made in the last 24 hours, and a model may start a create or change only below 5.'
+  expect(await tool('act create cartwheel')).toBe(`${refused} The person can still type /clawd act create.`)
+  expect(await tool('skin create frog')).toBe(`${refused} The person can still type /clawd skin create.`)
+  expect(await tool('act change spin_one faster')).toBe(`${refused} The person can still type /clawd act change.`)
+  expect(await tool('act spin_one')).toBe('Clawd: spin_one.')
+  expect((await run('act create cartwheel'))?.text).toBe('Clawd: opus writes cartwheel, in a minute or two; it plays when done.')
 })

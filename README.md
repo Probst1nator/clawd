@@ -76,8 +76,16 @@ time. `/clawd act create <name> [what it does]` has Opus write a new act. The na
 is enough: `/clawd skin create claude_with_glasses` draws what the name says. For a
 sentence such as `/clawd skin create claude with glasses`, Haiku picks the name.
 `/clawd act change <act> <what to change>`, `/clawd emote change` and `/clawd skin change`
-change one; with nothing after the name, they make it again from scratch. Each runs only
-when you type it.
+change one; with nothing after the name, they make it again from scratch. Each runs when
+you type it, or when Claude runs it through the clawd tool (below).
+
+## Claude can control Clawd
+
+The mod gives the session's Claude one tool, `mcp__clawd__clawd`, which takes any
+`/clawd` command as text and answers what `/clawd` would show. Claude Code loads it only
+when Claude asks for it, so until then it costs one line of context. Ask Claude to have
+Clawd wave, or to make a new act, and it can do it itself. A create or change Claude
+starts waits for the same limit of 5 a day as the autopicker's; one you type does not.
 
 ## Where it keeps things
 

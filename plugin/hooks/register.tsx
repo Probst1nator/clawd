@@ -97,6 +97,26 @@ const NEW_PER_DAY = 5 // new acts, emotes and skins the picker may ask for in an
 const FEED_MAX = 40 // lines kept for the next pick
 const DAY_MS = 24 * 3600_000
 const TRACE_MAX = 50 // picks kept per session in picks/
+// The session's model runs /clawd commands through one tool. The engine lists
+// a registered tool behind ToolSearch, so until a model asks for it only the
+// name is in the context. It takes all of /clawd; a create or change it starts
+// counts against NEW_PER_DAY, which a person's typed one skips.
+const CLAWD_TOOL = 'mcp__clawd__clawd'
+const TOOL_DESCRIPTION = [
+  'Runs a /clawd command for Clawd, the Claude Code logo that runs in the band above the prompt, and its minis',
+  '(a1, a2, ...: a small Clawd for each running subagent). `command` is what the person would type after /clawd,',
+  'and the answer is the text /clawd shows them. Examples: "list acts", "list made", "list emotes", "list skins",',
+  '"list minis"; "act wave 2" plays an act 1 to 5 times; "a1 celebrate" has a mini play one; "emote huh" puts on a',
+  'look for a while; "skin matsci_octopus" wears a skin for the session, "skin auto" goes back; "" says what Clawd',
+  'is doing; "help"; "on" or "off" (remembered across sessions); "autopick on", "off", "now", "haiku", "sonnet" or',
+  '"opus"; "act create <name> [what it does]", "emote create <name> [image path] [what it looks like]", "skin create',
+  '..."; "act change <name> [what to change]"; "act delete <name>"; "act preview <name>" writes a PNG and answers',
+  'its path. emote and skin take the same create, change, delete and preview. Use full names: a short word plays',
+  `the one name it fits. Create and change start a ${MAKE_MODEL} run on the person's Claude usage, refused once`,
+  `${NEW_PER_DAY} acts, emotes and skins were made in the last 24 hours. Play acts and emotes when the person asks`,
+  'something of Clawd, or to mark a moment they would enjoy. Run create, change, delete, skin, on, off and',
+  'autopick only when the person asks for them.',
+].join(' ')
 // Emotes: looks Clawd takes for a while. emotes/ holds the
 // ones drawn by hand, data/emotes/ the ones a model drew. A model draws one in
 // a headless `claude -p` run, because $.model.complete takes no image: the run
@@ -1105,9 +1125,11 @@ function pickPrompt(
     // act fits" wording answered "hi snowman" with a wave, 0 of 18 nicknames.
     canMake
       ? '- new: first read what the person just wrote. When they call Clawd by a name, compare it to\n' +
-        '  something or ask it for something ("hey pirate", "he looks like a teapot", "do a cartwheel"),\n' +
+        '  something or ask Clawd itself for a trick ("hey pirate", "he looks like a teapot", "do a cartwheel"),\n' +
         '  they want to see Clawd become that thing or do that trick. If no act in <acts> shows exactly\n' +
-        '  that, ask for one. Also ask when the session reaches a moment worth its own act. Asking is\n' +
+        '  that, ask for one. A task the person gives the session (open an app, a page or a file, fix\n' +
+        "  a bug) is work for the assistant: answer it with acts from <acts>, since Clawd's moves cannot\n" +
+        '  show windows, pages or files. Asking is\n' +
         '  {"name": "snake_case_name", "title": "what it shows and when it fits, under 80 characters",\n' +
         '  "for": "<who plays it first>"}; otherwise new is null. Add "look": "become" when Clawd should\n' +
         '  look like that thing (a pirate, a teapot), or "look": "hold" when it should hold, use or show a\n' +
@@ -1574,6 +1596,8 @@ async function clawdHelp($: EngineInterface): Promise<string> {
     'shows the names the word fits, and a space writes out a word that fits one name.',
     '',
     '/clawd help uml draws how Clawd behaves and how a new act, emote or skin is made and found, as UML.',
+    `The session's model can run any /clawd command through the tool ${CLAWD_TOOL}, which it loads when it needs it;`,
+    `a create or change it starts waits for the ${NEW_PER_DAY} a day.`,
   ].join('\n')
 }
 
@@ -1923,10 +1947,151 @@ async function skinCommand($: EngineInterface, rest: readonly string[], names: N
   return (await lookCommand($, SKIN_KIT, first, rest.slice(1), names, begin)) ?? `${await skinLine($)} ${how}`
 }
 
+/** Registers the clawd tool; a failure goes to the debug log and leaves the band running. */
+async function registerTool($: EngineInterface): Promise<void> {
+  try {
+    await $.tool.register({
+      name: 'clawd',
+      description: TOOL_DESCRIPTION,
+      inputSchema: {
+        type: 'object',
+        properties: { command: { type: 'string', description: 'The words after /clawd, such as "act wave 2"; "" for what Clawd is doing.' } },
+        required: ['command'],
+      },
+    })
+  } catch (err) {
+    $.ui.log(`clawd: the clawd tool was not registered: ${err instanceof Error ? err.message : String(err)}`, { to: 'debug' })
+  }
+}
+
+/** Acts, emotes and skins a model made in the last 24 hours, counted from the files, so over all sessions and hosts. */
+async function madeLastDay($: EngineInterface): Promise<number> {
+  const now = await $.clock.now()
+  const dated = [...(await loadMade($)), ...(await loadEmotes($)), ...(await loadSkins($))]
+  return dated.filter(r => r.made && now - Date.parse(r.made) < DAY_MS).length
+}
+
+/**
+ * The words after `/clawd`, run, and the answer: from the command the person
+ * types, or from the clawd tool (`isModel`). `columns` is the width
+ * `/clawd help uml` is drawn for.
+ */
+async function clawdRun($: EngineInterface, args: string, columns: number, isModel: boolean): Promise<string> {
+  const words = args.trim().split(/\s+/).filter(Boolean)
+  // A word may be cut short while it fits one name (clawd-words.ts).
+  const names = await loadNames($)
+  const order = orderOf(words, names)
+  if (order.kind === 'status') return clawdStatus($)
+  if (order.kind === 'unclear') return order.text
+  if (order.kind === 'list') return clawdListOf($, order.of)
+  const w = clawd.world
+  if (order.kind === 'play') {
+    if (!w) return 'Clawd is not on screen.'
+    const { who, fit, count: n } = order
+    const what = fit.kind === 'emote' ? (await loadEmotes($)).find(x => x.name === fit.name) : fit.kind === 'made' ? (await loadMade($)).find(r => r.name === fit.name) : undefined
+    if (fit.kind !== 'act' && !what) return `Clawd: ${fit.name} is gone.`
+    if (who !== 'clawd' && !bodyOf(w, who)) return `Clawd: ${who} has left.`
+    // All repeats are queued at once, so one does not cut the next short.
+    perform(w, what ?? (fit.name as ActKind), n, who)
+    const name = who === 'clawd' ? 'Clawd' : who
+    return n > 1 ? `${name}: ${fit.name} ×${n}.` : `${name}: ${fit.name}.`
+  }
+  const verb = order.name
+  const [arg] = order.rest
+  // A create or change the person types starts at once; one a model asks for
+  // waits for the daily limit, as the autopicker's asks do.
+  if (isModel && (verb === 'act' || verb === 'emote' || verb === 'skin') && (arg === 'create' || arg === 'change')) {
+    const made = await madeLastDay($)
+    if (made >= NEW_PER_DAY) {
+      return `Clawd: ${made} acts, emotes and skins were made in the last 24 hours, and a model may start a create or change only below ${NEW_PER_DAY}. The person can still type /clawd ${verb} ${arg}.`
+    }
+  }
+  if (verb === 'help') {
+    if (arg === undefined) return clawdHelp($)
+    return 'uml'.startsWith(arg) ? clawdHelpUml($, columns) : 'Clawd: /clawd help takes uml or nothing.'
+  }
+  if (verb === 'on' || verb === 'off') {
+    await update($, isClawdOn, () => verb === 'on')
+    await $.store.set('isClawdOn', verb === 'on')
+    return `Clawd ${verb}.`
+  }
+  // Bare trace, debug and autopick switch their state; on and off still set it.
+  if (verb === 'trace') {
+    const turn = arg === undefined ? undefined : ['on', 'off'].find(t => t === arg || (arg.length > 1 && t.startsWith(arg)))
+    if (arg !== undefined && !turn) return 'Clawd: /clawd trace takes on, off or nothing.'
+    const isOn = turn ? turn === 'on' : !(await read($, isTracing))
+    await update($, isTracing, () => isOn)
+    return isOn
+      ? `Clawd: each autopick now goes to ${mod.dataDir}/picks/${await $.session.id()}.jsonl (the last ${TRACE_MAX}). /clawd trace stops it.`
+      : 'Clawd: autopicks are no longer traced.'
+  }
+  if (verb === 'debug') {
+    const turn = arg === undefined ? undefined : ['on', 'off'].find(t => t === arg || (arg.length > 1 && t.startsWith(arg)))
+    if (arg !== undefined && !turn) return 'Clawd: /clawd debug takes on, off or nothing.'
+    const isOn = turn ? turn === 'on' : !(await read($, isDebugging))
+    await update($, isDebugging, () => isOn)
+    // Switched on, the next pick shows its whole request again.
+    if (isOn) brain.shown.clear()
+    // Debug looked broken while autopick was off and no pick ran.
+    const offHint = !(await isAutopicking($))
+      ? ' Autopick is off, so only /clawd autopick now picks; /clawd autopick lets it run by itself.'
+      : mod.isRemote
+        ? ' Autopick is paused while Remote Control is on, so only /clawd autopick now picks.'
+        : ''
+    return isOn
+      ? `Clawd: debug on. Each autopick's tokens, the request it sent, its whole reply and what came of it now show here, dim and not sent to the model. A part of the request that is as last shown is left out and named. The model's thinking is not available to a mod.${offHint} /clawd debug turns it off.`
+      : 'Clawd: debug off.'
+  }
+  if (verb === 'autopick') {
+    const turn = arg === undefined ? undefined : ['now', 'on', 'off', ...PICK_MODELS].find(t => t === arg || (arg.length > 1 && t.startsWith(arg)))
+    if (arg !== undefined && !turn) return 'Clawd: /clawd autopick takes now, on, off, haiku, sonnet, opus or nothing.'
+    if (turn === 'now') {
+      $.clock.after(1, () => void pickNext($, ASKED))
+      return 'Clawd: the autopicker chooses now; /clawd shows its pick.'
+    }
+    // A model word sets the picker model and leaves the switch as it is.
+    const model = PICK_MODELS.find(m => m === turn)
+    if (model) {
+      await $.store.set('pickModel', model)
+      const state = !(await isAutopicking($))
+        ? ' The autopicker is off; /clawd autopick turns it on.'
+        : mod.isRemote
+          ? ' It is paused while Remote Control is on.'
+          : ''
+      const cost = model === DEFAULT_PICK_MODEL ? '' : ` Each pick costs more of your Claude usage than with ${DEFAULT_PICK_MODEL}.`
+      return `Clawd: the autopicker uses ${model} (remembered).${cost}${state}`
+    }
+    const isOn = turn ? turn === 'on' : !(await isAutopicking($))
+    await $.store.set('isAutopickOn', isOn)
+    if (isOn) {
+      if (!mod.isRemote) schedulePick($, await $.clock.now())
+      return (
+        `Clawd: the autopicker is on (remembered). ${await autopickModel($)} picks what plays after each prompt and turn and every ` +
+        `${PICK_MIN_S} to ${PICK_MAX_S} s, about 100 calls an hour in a busy session, and may have ${MAKE_MODEL} make ` +
+        `up to ${NEW_PER_DAY} new acts or emotes a day. It all counts against your Claude usage. /clawd autopick turns it off; ` +
+        '/clawd autopick haiku, sonnet or opus switches the model.' +
+        (mod.isRemote ? ' It is paused while Remote Control is on and starts when Remote Control ends.' : '')
+      )
+    }
+    brain.timer?.cancel()
+    brain.timer = null
+    brain.dueAt = 0
+    return 'Clawd: the autopicker is off (remembered). Clawd plays random acts and makes no model calls. /clawd autopick turns it on.'
+  }
+  if (verb === 'skin') return skinCommand($, order.rest, names)
+  if (verb === 'act') return actCommand($, arg ?? '', order.rest.slice(1), names)
+  if (verb !== 'emote') return clawdStatus($)
+  const begin = (name: string, title: string, why: string, image: string, start?: Change<Emote>, replace?: MadeEmote) =>
+    startEmote($, name, title, why, image, 'clawd', start, '', replace)
+  return (await lookCommand($, EMOTE_KIT, arg ?? '', order.rest.slice(1), names, begin)) ?? (await clawdStatus($))
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    const started = await next(e)
     mod.isOff = (await $.env.get('CLAUDE_CLAWD_OFF')) === '1' || !e.isInteractive
+    // The tool is registered before next(e), as the engine's own example does.
+    if (!mod.isOff) await registerTool($)
+    const started = await next(e)
     if (mod.isOff) return started
     const seed = Number(await $.env.get('CLAUDE_CLAWD_SEED'))
     if (Number.isInteger(seed)) mod.rand = seeded(seed)
@@ -2012,6 +2177,8 @@ export const register: Register = on => {
   })
 
   on('tool.call', async ($, e, next) => {
+    // A clawd tool call is no work to show: its brick would cut short the act it asked for.
+    if ((e.tool as string) === CLAWD_TOOL) return next(e)
     const ran = await next(e)
     const isError = ran.deny !== undefined || ran.isError === true
     // A Read, or a Bash call the engine judged read-only (rg, ls, cat), makes it read.
@@ -2041,114 +2208,20 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'clawd' }, async ($, e) => {
-    const words = e.args.trim().split(/\s+/).filter(Boolean)
     if (mod.names) {
       mod.names = undefined
       await setMenu($, undefined)
     }
-    // A word may be cut short while it fits one name (clawd-words.ts).
-    const names = await loadNames($)
-    const order = orderOf(words, names)
-    if (order.kind === 'status') return { text: await clawdStatus($) }
-    if (order.kind === 'unclear') return { text: order.text }
-    if (order.kind === 'list') return { text: await clawdListOf($, order.of) }
-    const w = clawd.world
-    if (order.kind === 'play') {
-      if (!w) return { text: 'Clawd is not on screen.' }
-      const { who, fit, count: n } = order
-      const what = fit.kind === 'emote' ? (await loadEmotes($)).find(x => x.name === fit.name) : fit.kind === 'made' ? (await loadMade($)).find(r => r.name === fit.name) : undefined
-      if (fit.kind !== 'act' && !what) return { text: `Clawd: ${fit.name} is gone.` }
-      if (who !== 'clawd' && !bodyOf(w, who)) return { text: `Clawd: ${who} has left.` }
-      // All repeats are queued at once, so one does not cut the next short.
-      perform(w, what ?? (fit.name as ActKind), n, who)
-      const name = who === 'clawd' ? 'Clawd' : who
-      return { text: n > 1 ? `${name}: ${fit.name} ×${n}.` : `${name}: ${fit.name}.` }
-    }
-    const verb = order.name
-    const [arg] = order.rest
-    if (verb === 'help') {
-      if (arg === undefined) return { text: await clawdHelp($) }
-      return { text: 'uml'.startsWith(arg) ? await clawdHelpUml($, e.presentation.columns) : 'Clawd: /clawd help takes uml or nothing.' }
-    }
-    if (verb === 'on' || verb === 'off') {
-      await update($, isClawdOn, () => verb === 'on')
-      await $.store.set('isClawdOn', verb === 'on')
-      return { text: `Clawd ${verb}.` }
-    }
-    // Bare trace, debug and autopick switch their state; on and off still set it.
-    if (verb === 'trace') {
-      const turn = arg === undefined ? undefined : ['on', 'off'].find(t => t === arg || (arg.length > 1 && t.startsWith(arg)))
-      if (arg !== undefined && !turn) return { text: 'Clawd: /clawd trace takes on, off or nothing.' }
-      const isOn = turn ? turn === 'on' : !(await read($, isTracing))
-      await update($, isTracing, () => isOn)
-      return {
-        text: isOn
-          ? `Clawd: each autopick now goes to ${mod.dataDir}/picks/${await $.session.id()}.jsonl (the last ${TRACE_MAX}). /clawd trace stops it.`
-          : 'Clawd: autopicks are no longer traced.',
-      }
-    }
-    if (verb === 'debug') {
-      const turn = arg === undefined ? undefined : ['on', 'off'].find(t => t === arg || (arg.length > 1 && t.startsWith(arg)))
-      if (arg !== undefined && !turn) return { text: 'Clawd: /clawd debug takes on, off or nothing.' }
-      const isOn = turn ? turn === 'on' : !(await read($, isDebugging))
-      await update($, isDebugging, () => isOn)
-      // Switched on, the next pick shows its whole request again.
-      if (isOn) brain.shown.clear()
-      // Debug looked broken while autopick was off and no pick ran.
-      const offHint = !(await isAutopicking($))
-        ? ' Autopick is off, so only /clawd autopick now picks; /clawd autopick lets it run by itself.'
-        : mod.isRemote
-          ? ' Autopick is paused while Remote Control is on, so only /clawd autopick now picks.'
-          : ''
-      return {
-        text: isOn
-          ? `Clawd: debug on. Each autopick's tokens, the request it sent, its whole reply and what came of it now show here, dim and not sent to the model. A part of the request that is as last shown is left out and named. The model's thinking is not available to a mod.${offHint} /clawd debug turns it off.`
-          : 'Clawd: debug off.',
-      }
-    }
-    if (verb === 'autopick') {
-      const turn = arg === undefined ? undefined : ['now', 'on', 'off', ...PICK_MODELS].find(t => t === arg || (arg.length > 1 && t.startsWith(arg)))
-      if (arg !== undefined && !turn) return { text: 'Clawd: /clawd autopick takes now, on, off, haiku, sonnet, opus or nothing.' }
-      if (turn === 'now') {
-        $.clock.after(1, () => void pickNext($, ASKED))
-        return { text: 'Clawd: the autopicker chooses now; /clawd shows its pick.' }
-      }
-      // A model word sets the picker model and leaves the switch as it is.
-      const model = PICK_MODELS.find(m => m === turn)
-      if (model) {
-        await $.store.set('pickModel', model)
-        const state = !(await isAutopicking($))
-          ? ' The autopicker is off; /clawd autopick turns it on.'
-          : mod.isRemote
-            ? ' It is paused while Remote Control is on.'
-            : ''
-        const cost = model === DEFAULT_PICK_MODEL ? '' : ` Each pick costs more of your Claude usage than with ${DEFAULT_PICK_MODEL}.`
-        return { text: `Clawd: the autopicker uses ${model} (remembered).${cost}${state}` }
-      }
-      const isOn = turn ? turn === 'on' : !(await isAutopicking($))
-      await $.store.set('isAutopickOn', isOn)
-      if (isOn) {
-        if (!mod.isRemote) schedulePick($, await $.clock.now())
-        return {
-          text:
-            `Clawd: the autopicker is on (remembered). ${await autopickModel($)} picks what plays after each prompt and turn and every ` +
-            `${PICK_MIN_S} to ${PICK_MAX_S} s, about 100 calls an hour in a busy session, and may have ${MAKE_MODEL} make ` +
-            `up to ${NEW_PER_DAY} new acts or emotes a day. It all counts against your Claude usage. /clawd autopick turns it off; ` +
-            '/clawd autopick haiku, sonnet or opus switches the model.' +
-            (mod.isRemote ? ' It is paused while Remote Control is on and starts when Remote Control ends.' : ''),
-        }
-      }
-      brain.timer?.cancel()
-      brain.timer = null
-      brain.dueAt = 0
-      return { text: 'Clawd: the autopicker is off (remembered). Clawd plays random acts and makes no model calls. /clawd autopick turns it on.' }
-    }
-    if (verb === 'skin') return { text: await skinCommand($, order.rest, names) }
-    if (verb === 'act') return { text: await actCommand($, arg ?? '', order.rest.slice(1), names) }
-    if (verb !== 'emote') return { text: await clawdStatus($) }
-    const begin = (name: string, title: string, why: string, image: string, start?: Change<Emote>, replace?: MadeEmote) =>
-      startEmote($, name, title, why, image, 'clawd', start, '', replace)
-    return { text: (await lookCommand($, EMOTE_KIT, arg ?? '', order.rest.slice(1), names, begin)) ?? (await clawdStatus($)) }
+    return { text: await clawdRun($, e.args, e.presentation.columns, false) }
+  })
+
+  // The clawd tool: the session's model, or a subagent, runs a /clawd command. A
+  // RegExp, because the engine's tool-name type lists only the tools it had
+  // when the mod last loaded.
+  on('tool.call', { tool: new RegExp(`^${CLAWD_TOOL}$`) }, async ($, e) => {
+    const { command } = e as unknown as { command?: unknown } // a tool's input fields sit on the event
+    const args = typeof command === 'string' ? command.trim().replace(/^\/clawd(\s+|$)/, '') : ''
+    return { result: await clawdRun($, args, UML_WIDTH, true) }
   })
 
   // /clawd help uml in colour. The stored row keeps the plain text the model reads.
