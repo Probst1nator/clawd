@@ -107,7 +107,7 @@ const TOOL_DESCRIPTION = [
   '(a1, a2, ...: a small Clawd for each running subagent). `command` is what the person would type after /clawd,',
   'and the answer is the text /clawd shows them. Examples: "list acts", "list made", "list emotes", "list skins",',
   '"list minis"; "act wave 2" plays an act 1 to 5 times; "a1 celebrate" has a mini play one; "emote huh" puts on a',
-  'look for a while; "skin matsci_octopus" wears a skin for the session, "skin auto" goes back; "" says what Clawd',
+  'look for a while; "skin <skin>" wears a skin for the session, "skin auto" goes back; "" says what Clawd',
   'is doing; "help"; "on" or "off" (remembered across sessions); "autopick on", "off", "now", "haiku", "sonnet" or',
   '"opus"; "act create <name> [what it does]", "emote create <name> [image path] [what it looks like]", "skin create',
   '..."; "act change <name> [what to change]"; "act delete <name>"; "act preview <name>" writes a PNG and answers',
@@ -198,7 +198,7 @@ const clawdPickedSkin = atom({ plugin: 'clawd', key: 'clawdPickedSkin' } as cons
 // `/clawd skin` chooses one for the session, else the autopicker picked one
 // for the session, else the plugin's clawd.json names one
 // (`fileSkin`), else
-// `ROOT_SKINS` gives one for the project root (`root`).
+// a folder rule gives one for the project root (`root`, `folderRule`).
 const mod = {
   isOff: false,
   rand: Math.random,
@@ -206,6 +206,7 @@ const mod = {
   emoteDir: '',
   skinDir: '',
   fileSkin: '',
+  folderRules: [] as FolderSkin[], // the person's folder rules, as applySkin last read them
   root: '',
   skin: null as MadeSkin | null,
   project: '',
@@ -217,8 +218,11 @@ const mod = {
 /** An act a model made, as kept in data/acts/<name>.json. */
 type MadeAct = Routine & { made: string; project: string; why: string }
 
-/** What the file of a skin or an emote keeps besides the look: when, where and why it was made, its reference image, the file. */
-type Dated = { made: string; project: string; why: string; image: string; file: string }
+/**
+ * What the file of a skin or an emote keeps besides the look: when, where and why it was made, its reference image, the file.
+ * A skin with `"hidden": true` is left out of the menu, the lists and the models' choices; only a folder rule puts it on.
+ */
+type Dated = { made: string; project: string; why: string; image: string; file: string; isHidden?: boolean }
 
 /** An emote from emotes/ (`made` empty) or data/emotes/. */
 type MadeEmote = Emote & Dated
@@ -458,7 +462,7 @@ async function loadLooks<T extends { name: string; title: string }>($: EngineInt
         if (typeof look === 'string' || found.some(e => e.name === look.name)) continue
         const text = (v: unknown) => (typeof v === 'string' ? v : '')
         const file = `${dir}/${entry.name}`
-        here.push({ ...look, made: text(raw.made), project: text(raw.project), why: text(raw.why), image: text(raw.image), file })
+        here.push({ ...look, made: text(raw.made), project: text(raw.project), why: text(raw.why), image: text(raw.image), file, isHidden: raw.hidden === true })
       } catch {
         // half-written or broken; skip it
       }
@@ -501,15 +505,61 @@ async function fileSkinOf($: EngineInterface, root: string): Promise<string> {
   }
 }
 
-// Without a clawd.json skin, a session whose project root has `part` in its
-// path, in any case, wears `skin`. The root moves with /cd and worktree moves but not with a
-// shell cd, so an agent passing through a MatSci folder does not switch it.
-const ROOT_SKINS = [{ part: 'matsci', skin: 'matsci_octopus' }]
+// Without a clawd.json skin, a session whose project root matches a folder
+// rule wears that rule's skin. The person's
+// rules in folder-skins.json in the data folder come first, then FOLDER_SKINS;
+// the first that matches wins, and "none" keeps Clawd's own body. The root
+// moves with /cd and worktree moves but not with a shell cd, so an agent
+// passing through a folder does not switch it.
+const FOLDER_SKINS: FolderSkin[] = [{ match: 'MatSci|matsci', skin: 'matsci_octopus' }]
+const FOLDER_SKINS_FILE = 'folder-skins.json'
 const ROOT_POLL_MS = 1000
+
+/** A folder rule: a project root whose path matches `match`, a regular expression, wears `skin`. */
+type FolderSkin = { match: string; skin: string }
+
+/** The person's folder rules from folder-skins.json in the data folder, each `match` a RegExp; [] without the file. */
+async function readFolderSkins($: EngineInterface): Promise<FolderSkin[]> {
+  let text: string
+  try {
+    text = await $.fs.read(`${mod.dataDir}/${FOLDER_SKINS_FILE}`)
+  } catch {
+    return [] // no such file
+  }
+  if (!text.trim()) return []
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    $.ui.log(`clawd: ${FOLDER_SKINS_FILE} is not JSON; its rules are skipped`, { to: 'debug' })
+    return []
+  }
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter((r): r is FolderSkin => typeof r?.match === 'string' && typeof r?.skin === 'string')
+    .filter(rule => {
+      try {
+        return new RegExp(rule.match) instanceof RegExp
+      } catch {
+        $.ui.log(`clawd: ${FOLDER_SKINS_FILE}: "${rule.match}" is not a regular expression; the rule is skipped`, { to: 'debug' })
+        return false
+      }
+    })
+}
+
+/** The first folder rule whose `match` fits the project root, the person's before the built-in ones, and where it is written. */
+function folderRule(): { rule: FolderSkin; from: string } | undefined {
+  const sets: [FolderSkin[], string][] = [[mod.folderRules, FOLDER_SKINS_FILE], [FOLDER_SKINS, 'built in']]
+  for (const [rules, from] of sets) {
+    const rule = rules.find(r => new RegExp(r.match).test(mod.root))
+    if (rule) return { rule, from }
+  }
+  return undefined
+}
 
 /**
  * The skin for now and where it comes from: /clawd skin's choice, the
- * autopicker's, clawd.json's, the project root's; '' for Clawd's own body.
+ * autopicker's, clawd.json's, a folder rule's; '' for Clawd's own body.
  */
 async function skinNow($: EngineInterface): Promise<{ name: string; from: string }> {
   const chosen = await read($, clawdSkin)
@@ -517,13 +567,14 @@ async function skinNow($: EngineInterface): Promise<{ name: string; from: string
   const picked = await read($, clawdPickedSkin)
   if (picked !== null) return { name: picked, from: 'picked by the autopicker for this session; /clawd skin auto goes back' }
   if (mod.fileSkin) return { name: mod.fileSkin, from: "named in the mod's clawd.json" }
-  const path = mod.root.toLowerCase()
-  const rule = ROOT_SKINS.find(r => path.includes(r.part))
-  return rule ? { name: rule.skin, from: `the project folder has "${rule.part}" in its path` } : { name: '', from: '' }
+  const found = folderRule()
+  if (!found) return { name: '', from: '' }
+  return { name: found.rule.skin === 'none' ? '' : found.rule.skin, from: `the project folder matches "${found.rule.match}" (${found.from})` }
 }
 
 /** Reads the skin for now and gives it to Clawd: with a puff when it changes and `isChange`, else quietly. */
 async function applySkin($: EngineInterface, isChange: boolean): Promise<void> {
+  mod.folderRules = await readFolderSkins($) // read here, so /clawd skin names the skin worn, not one an edit asks for
   const { name } = await skinNow($)
   mod.skin = name ? ((await loadSkins($)).find(x => x.name === name) ?? null) : null
   if (clawd.world) setSkin(clawd.world, mod.skin, !isChange)
@@ -1599,7 +1650,7 @@ function startAct($: EngineInterface, name: string, title: string, why: string, 
 async function writeAct($: EngineInterface, name: string, title: string, why: string, who: string, change?: ActChange, replace?: MadeAct): Promise<void> {
   const emotes = await loadEmotes($)
   const made = await loadMade($, emotes)
-  const skins = await loadSkins($)
+  const skins = (await loadSkins($)).filter(x => !x.isHidden)
   let result: MadeAct | string
   try {
     result = (await makeActByMaker($, name, title, why, made, emotes, skins, change, replace)) ?? (await makeAct($, name, title, why, made, emotes, skins, change, replace))
@@ -1668,7 +1719,7 @@ async function pick($: EngineInterface, w: World, trigger: string, now: number):
   const fedUpTo = brain.seq
   // What the person wrote in the lines this pick reads: an image path the picker names must be in there.
   const userWrote = brain.feed.filter(l => l.n <= fedUpTo && l.text.startsWith('user: ')).map(l => l.text).join('\n')
-  const prompt = pickPrompt(w, trigger, made, emotes, skins, mayWear, madeToday, now, await localTime($))
+  const prompt = pickPrompt(w, trigger, made, emotes, skins.filter(x => !x.isHidden), mayWear, madeToday, now, await localTime($))
   const model = await autopickModel($)
   const answer = await $.model.complete({
     model,
@@ -1789,7 +1840,7 @@ async function pick($: EngineInterface, w: World, trigger: string, now: number):
 async function loadNames($: EngineInterface): Promise<Names> {
   const emotes = await loadEmotes($)
   const made = await loadMade($, emotes)
-  const skins = await loadSkins($)
+  const skins = (await loadSkins($)).filter(x => !x.isHidden)
   const minis = (clawd.world?.minis ?? []).filter(m => !m.isLeaving)
   return {
     minis: Object.fromEntries(minis.map(m => [m.id, `the mini for "${oneLine(m.title, 40)}"`])),

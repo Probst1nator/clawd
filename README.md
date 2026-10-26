@@ -53,6 +53,25 @@ so older versions may not load it.
 While you type `/clawd `, a list above the prompt shows what fits, and a space writes out
 a word that fits one name.
 
+## A skin per folder
+
+A skin can go with a folder. Put a list of rules into `folder-skins.json` in the folder
+named under "Where it keeps things":
+
+```json
+[
+  {"match": "/work/", "skin": "claude_with_glasses"},
+  {"match": "notes$", "skin": "none"}
+]
+```
+
+A session whose project folder matches a rule's `match`, a JavaScript regular expression
+tested against the folder's full path, wears that rule's skin, and `none` keeps Clawd's
+own body. The first rule that matches wins. A skin you chose with `/clawd skin` or the
+autopicker picked comes first. The rules are read at session start, when `/cd` or a
+worktree switch moves the project folder, and on `/clawd skin auto`; a `cd` inside a
+command changes nothing.
+
 ## Model calls
 
 By default the mod makes no model calls. Clawd picks random acts by itself.
