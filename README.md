@@ -61,13 +61,14 @@ named under "Where it keeps things":
 ```json
 [
   {"match": "/work/", "skin": "claude_with_glasses"},
-  {"match": "notes$", "skin": "none"}
+  {"match": "notes$", "flags": "i", "skin": "none"}
 ]
 ```
 
 A session whose project folder matches a rule's `match`, a JavaScript regular expression
 tested against the folder's full path, wears that rule's skin, and `none` keeps Clawd's
-own body. The first rule that matches wins. A skin you chose with `/clawd skin` or the
+own body. `flags` are the expression's flags; `"i"` matches in any case. The first rule
+that matches wins. A skin you chose with `/clawd skin` or the
 autopicker picked comes first. The rules are read at session start, when `/cd` or a
 worktree switch moves the project folder, and on `/clawd skin auto`; a `cd` inside a
 command changes nothing.

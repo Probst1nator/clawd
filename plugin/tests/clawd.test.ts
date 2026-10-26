@@ -863,7 +863,7 @@ test('a skin is Clawd\'s body from the start without a puff, an emote takes over
   expect(colors(frameCells(low)).has(0x649feb)).toBe(true)
 })
 
-test('without a clawd.json skin, the built-in folder rule gives Clawd the MatSci octopus skin in a MatSci or matsci folder, moving the root takes it off and puts it back, and /clawd skin chooses for the session', async ($, on) => {
+test('without a clawd.json skin, the built-in folder rule gives Clawd the MatSci octopus skin in a matsci folder of any case, moving the root takes it off and puts it back, and /clawd skin chooses for the session', async ($, on) => {
   const clock = mock.clock(on, { now: 1_700_000_000_000 })
   mock.store(on)
   mock.env(on, { HOME: '/home/t', CLAUDE_CLAWD_SEED: '7' })
@@ -915,7 +915,7 @@ test('without a clawd.json skin, the built-in folder rule gives Clawd the MatSci
   // /clawd skin none keeps Clawd's own body for the session, also when the root moves; auto goes back.
   const run = (args: string) =>
     $.command.run({ command: 'clawd', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
-  expect((await run('skin'))?.text).toMatch(/^Skin: matsci_octopus \("a blue octopus"\); the project folder matches "MatSci\|matsci" \(built in\)\./)
+  expect((await run('skin'))?.text).toMatch(/^Skin: matsci_octopus \("a blue octopus"\); the project folder matches "matsci" \(flags "i", built in\)\./)
   expect((await run('skin none'))?.text).toBe("Clawd: Skin: none, Clawd's own body; chosen with /clawd skin for this session. /clawd skin auto goes back.")
   root = '/home/t/notes/matsci/sub'
   await clock.advance(3000)
@@ -971,18 +971,18 @@ test('folder-skins.json rules come before the built-in one, a rule that is no re
   await clock.advance(2000)
   expect((await run('skin'))?.text).toMatch(/^Skin: none, Clawd's own body; the project folder matches "MatSci\/quiet" \(folder-skins\.json\)\./)
 
-  root = '/home/t/MatSci/loud'
+  root = '/home/t/MATSCI/loud'
   await clock.advance(2000)
-  expect((await run('skin'))?.text).toMatch(/^Skin: matsci_octopus \("a blue octopus"\); the project folder matches "MatSci\|matsci" \(built in\)\./)
+  expect((await run('skin'))?.text).toMatch(/^Skin: matsci_octopus \("a blue octopus"\); the project folder matches "matsci" \(flags "i", built in\)\./)
   const listed = (await run('list skins'))?.text ?? ''
   expect(listed).toContain('reef  a reef octopus')
   expect(listed).not.toContain('matsci_octopus')
   expect((await run('skin matsci_octopus'))?.text).toBe('Clawd: nothing is called "matsci_octopus". /clawd list skins shows what there is.')
 
   // An edit of the file waits for the next root move or /clawd skin auto, so /clawd skin names the skin worn.
-  files.set('/home/t/.claude/clawd/folder-skins.json', JSON.stringify([{ match: 'MatSci', skin: 'reef' }]))
-  expect((await run('skin'))?.text).toMatch(/^Skin: matsci_octopus \("a blue octopus"\); the project folder matches "MatSci\|matsci" \(built in\)\./)
-  expect((await run('skin auto'))?.text).toMatch(/^Clawd: Skin: reef \("a reef octopus"\); the project folder matches "MatSci" \(folder-skins\.json\)\./)
+  files.set('/home/t/.claude/clawd/folder-skins.json', JSON.stringify([{ match: 'MatSci', skin: 'none' }, { match: 'matsci/', flags: 'i', skin: 'reef' }]))
+  expect((await run('skin'))?.text).toMatch(/^Skin: matsci_octopus \("a blue octopus"\); the project folder matches "matsci" \(flags "i", built in\)\./)
+  expect((await run('skin auto'))?.text).toMatch(/^Clawd: Skin: reef \("a reef octopus"\); the project folder matches "matsci\/" \(flags "i", folder-skins\.json\)\./)
 })
 
 test("with a clawd.json skin Clawd has no body of its own: the tall skin shows from the first frame in a band too short for it, and /clawd skin has no none", async ($, on) => {

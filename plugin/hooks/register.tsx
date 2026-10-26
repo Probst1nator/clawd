@@ -508,15 +508,16 @@ async function fileSkinOf($: EngineInterface, root: string): Promise<string> {
 // Without a clawd.json skin, a session whose project root matches a folder
 // rule wears that rule's skin. The person's
 // rules in folder-skins.json in the data folder come first, then FOLDER_SKINS;
-// the first that matches wins, and "none" keeps Clawd's own body. The root
+// the first that matches wins, and "none" keeps Clawd's own body. `flags` are
+// RegExp flags: "i" matches in any case. The root
 // moves with /cd and worktree moves but not with a shell cd, so an agent
 // passing through a folder does not switch it.
-const FOLDER_SKINS: FolderSkin[] = [{ match: 'MatSci|matsci', skin: 'matsci_octopus' }]
+const FOLDER_SKINS: FolderSkin[] = [{ match: 'matsci', flags: 'i', skin: 'matsci_octopus' }]
 const FOLDER_SKINS_FILE = 'folder-skins.json'
 const ROOT_POLL_MS = 1000
 
-/** A folder rule: a project root whose path matches `match`, a regular expression, wears `skin`. */
-type FolderSkin = { match: string; skin: string }
+/** A folder rule: a project root whose path matches `match`, a regular expression with `flags`, wears `skin`. */
+type FolderSkin = { match: string; flags?: string; skin: string }
 
 /** The person's folder rules from folder-skins.json in the data folder, each `match` a RegExp; [] without the file. */
 async function readFolderSkins($: EngineInterface): Promise<FolderSkin[]> {
@@ -536,12 +537,12 @@ async function readFolderSkins($: EngineInterface): Promise<FolderSkin[]> {
   }
   if (!Array.isArray(raw)) return []
   return raw
-    .filter((r): r is FolderSkin => typeof r?.match === 'string' && typeof r?.skin === 'string')
+    .filter((r): r is FolderSkin => typeof r?.match === 'string' && typeof r?.skin === 'string' && (r.flags === undefined || typeof r.flags === 'string'))
     .filter(rule => {
       try {
-        return new RegExp(rule.match) instanceof RegExp
+        return new RegExp(rule.match, rule.flags) instanceof RegExp
       } catch {
-        $.ui.log(`clawd: ${FOLDER_SKINS_FILE}: "${rule.match}" is not a regular expression; the rule is skipped`, { to: 'debug' })
+        $.ui.log(`clawd: ${FOLDER_SKINS_FILE}: "${rule.match}"${rule.flags ? ` with flags "${rule.flags}"` : ''} is not a regular expression; the rule is skipped`, { to: 'debug' })
         return false
       }
     })
@@ -551,7 +552,7 @@ async function readFolderSkins($: EngineInterface): Promise<FolderSkin[]> {
 function folderRule(): { rule: FolderSkin; from: string } | undefined {
   const sets: [FolderSkin[], string][] = [[mod.folderRules, FOLDER_SKINS_FILE], [FOLDER_SKINS, 'built in']]
   for (const [rules, from] of sets) {
-    const rule = rules.find(r => new RegExp(r.match).test(mod.root))
+    const rule = rules.find(r => new RegExp(r.match, r.flags).test(mod.root))
     if (rule) return { rule, from }
   }
   return undefined
@@ -569,7 +570,8 @@ async function skinNow($: EngineInterface): Promise<{ name: string; from: string
   if (mod.fileSkin) return { name: mod.fileSkin, from: "named in the mod's clawd.json" }
   const found = folderRule()
   if (!found) return { name: '', from: '' }
-  return { name: found.rule.skin === 'none' ? '' : found.rule.skin, from: `the project folder matches "${found.rule.match}" (${found.from})` }
+  const how = found.rule.flags ? `flags "${found.rule.flags}", ${found.from}` : found.from
+  return { name: found.rule.skin === 'none' ? '' : found.rule.skin, from: `the project folder matches "${found.rule.match}" (${how})` }
 }
 
 /** Reads the skin for now and gives it to Clawd: with a puff when it changes and `isChange`, else quietly. */
