@@ -422,7 +422,7 @@ test('the picker asks for a new act and plays it before it exists, Opus writes i
   expect(traced.trigger).toBe('asked with /clawd autopick now')
   expect(traced.system).toMatch(/^You direct Clawd/)
   expect(traced.prompt).toContain('<new_since_your_last_pick>')
-  expect(traced.outcome).toBe('played nothing; new act victory_lap made')
+  expect(traced.outcome).toBe('played nothing; new act victory_lap being written')
   const debug = logs.findIndex(l => l.startsWith('Clawd debug'))
   const shown = logs.slice(debug)
   expect(shown[0]).toBe('Clawd debug · autopick, asked with /clawd autopick now · haiku · 1 tokens in, 0 cache read, 0 cache write, 1 out')
@@ -430,7 +430,7 @@ test('the picker asks for a new act and plays it before it exists, Opus writes i
   expect(shown[1]).toMatch(/^context · all \d+ parts · /)
   expect(shown[2]).toBe(`new  │ system: ${traced.system}`)
   expect(shown.slice(3, -2).map(r => r.slice(7))).toEqual(traced.prompt.split('\n'))
-  expect(shown.slice(-2)).toEqual([`reply: ${traced.reply}`, '→ played nothing; new act victory_lap made'])
+  expect(shown.slice(-2)).toEqual([`reply: ${traced.reply}`, '→ played nothing; new act victory_lap being written'])
   expect((await run('debug'))?.text).toBe('Clawd: debug off.')
   expect((await run('trace'))?.text).toBe('Clawd: autopicks are no longer traced.')
   const path = [...files.keys()].find(p => p === '/home/t/.claude/clawd/acts/victory_lap.json')
@@ -633,7 +633,8 @@ test('the band above the prompt holds Clawd, animated by blits, a row taller for
   })
 
   await $.session.start({ cwd: '/home/t/proj', surface: 'terminal', isInteractive: true })
-  expect(logs).toEqual([
+  // Nothing here answers agent.register, so makes would run the rounds; that line goes to the debug log.
+  expect(logs.filter(l => !l.startsWith('clawd: the maker agent was not registered'))).toEqual([
     'Clawd is on · /clawd help explains it · /clawd off hides it (remembered) · remove the mod: claude plugin disable clawd',
   ])
   const props = {
@@ -1472,7 +1473,7 @@ test('/clawd emote create has a model draw three drafts after a local image, pic
   expect((await run('list emotes'))?.text).not.toContain('octo')
 
   // The name alone is enough: the model draws from it in words, and capitals become snake_case.
-  expect((await run('emote create ClaudeWithGlasses'))?.text).toBe('Clawd: a model draws claude_with_glasses, in up to 3 rounds of a minute or two; it plays when done.')
+  expect((await run('emote create ClaudeWithGlasses'))?.text).toBe('Clawd: a model draws claude_with_glasses, in a few minutes; it plays when done.')
   await clock.advance(200)
   expect(rounds[7]?.stdin).toContain('The look: claude_with_glasses, "claude with glasses".')
   expect(rounds[7]?.stdin).toContain('There is no reference image; draw it from the title.')
@@ -1485,7 +1486,7 @@ test('/clawd emote create has a model draw three drafts after a local image, pic
 
   // A sentence gets its name from Haiku, told the kind and the names already taken.
   expect((await run('emote create a cat in a hat'))?.text).toBe(
-    'Clawd: a model draws cat_in_a_hat (named by haiku), in up to 3 rounds of a minute or two; it plays when done.',
+    'Clawd: a model draws cat_in_a_hat (named by haiku), in a few minutes; it plays when done.',
   )
   const asked = named[named.length - 1] ?? ''
   expect(asked).toContain('The person typed /clawd emote create, then these words: a cat in a hat\nAn emote is a look Clawd takes for a while.')
@@ -1590,7 +1591,7 @@ test('/clawd act create, change, delete and preview work as the emote commands d
   await run('autopick now')
   await clock.advance(10)
   const picked = JSON.parse(files.get(`${data}/picks/sess-1.jsonl`)?.trim().split('\n').pop() ?? '{}')
-  expect(picked.outcome).toBe('played clawd: wave; new act cartwheel asked, but it is still being made')
+  expect(picked.outcome).toBe('played clawd: wave; new act cartwheel asked, but cartwheel is still being made')
   open()
   await clock.advance(200)
   expect(prompts[0]).toMatch(/^Write the steps for a new act\.\nname: cartwheel\ntitle: turns a cartwheel across the band\n/)
@@ -2245,7 +2246,17 @@ test("the session's model runs /clawd commands through the clawd tool behind Too
     registered.push(e)
     return { value: { tool: `mcp__clawd__${e.name}` } }
   })
-  on('tool.call', async () => ({ result: 'edited' }))
+  let verdict: 'allow' | 'ask' | 'deny' = 'allow'
+  // $.ui.ask is a call of AskUserQuestion, which runs.
+  on('tool.check', async ($, e) => (e.tool === 'AskUserQuestion' ? { decision: 'allow' as const } : { decision: verdict, reason: 'plan mode' }))
+  const asked: string[] = []
+  let answer = 'Refuse'
+  on('tool.call', async ($, e) => {
+    if (e.tool !== 'AskUserQuestion') return { result: 'edited' }
+    const question = e.questions[0]?.question ?? ''
+    asked.push(question)
+    return { result: { questions: e.questions, answers: { [question]: answer } } as never }
+  })
   on('ui.blit', async () => ({ value: {} }))
   on('process.run', async () => ({ value: { exitCode: 0, stdout: 'Sat 17:00\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
   on('fs.stat', async ($, e) => ({ value: { kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false, realPath: e.path } }))
@@ -2288,8 +2299,8 @@ test("the session's model runs /clawd commands through the clawd tool behind Too
     return 'result' in r ? r.result : r
   }
 
-  // One tool, its schema loaded when a model asks for it (the engine's default).
-  expect(registered.map(t => [t.name, t.isDeferred])).toEqual([['clawd', undefined]])
+  // One tool, its schema loaded when a model asks for it (the engine's default), and the maker's render tool behind ToolSearch.
+  expect(registered.map(t => [t.name, t.isDeferred])).toEqual([['clawd', undefined], ['render', true]])
   expect(registered[0]?.inputSchema).toMatchObject({ required: ['command'] })
 
   // It answers as /clawd does, with or without the leading /clawd.
@@ -2319,4 +2330,132 @@ test("the session's model runs /clawd commands through the clawd tool behind Too
   expect(await tool('act change spin_one faster')).toBe(`${refused} The person can still type /clawd act change.`)
   expect(await tool('act spin_one')).toBe('Clawd: spin_one.')
   expect((await run('act create cartwheel'))?.text).toBe('Clawd: opus writes cartwheel, in a minute or two; it plays when done.')
+
+  // A command that changes something asks the engine's permission check first, as the
+  // tool's own answer comes before it; on an ask the person decides. Plays need no check.
+  verdict = 'deny'
+  expect(await tool('off')).toBe('Clawd: /clawd off is not allowed here: plan mode')
+  expect(await tool('act wave')).toBe('Clawd: wave.')
+  verdict = 'ask'
+  expect(await tool('act delete spin_one')).toBe('Clawd: the person refused /clawd act delete spin_one.')
+  answer = 'Allow'
+  expect(await tool('trace')).toContain('each autopick now goes to')
+  expect(asked).toEqual(['A model wants to run /clawd act delete spin_one. Allow it?', 'A model wants to run /clawd trace. Allow it?'])
+})
+
+test('a make runs one maker agent: it renders drafts, may Read only what it was given, and the last draft it rendered alone is kept', { timeoutMs: 30_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_700_000_000_000 })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/t', CLAUDE_CLAWD_SEED: '7' })
+  const data = '/home/t/.claude/clawd'
+  const files = new Map<string, string>()
+  const pngs: string[] = []
+  const claudeRuns: string[] = []
+  const spawned: { prompt: string; subagentType?: string }[] = []
+  on('ui.log', async () => ({ value: undefined }))
+  on('ui.toast', async () => ({ value: undefined }))
+  on('command.register', async ($, e) => ({ value: { command: e.name } }))
+  on('tool.register', async ($, e) => ({ value: { tool: `mcp__clawd__${e.name}` } }))
+  on('agent.register', async ($, e) => ({ value: { agent: `clawd:${e.name}` } }))
+  on('agent.list', async () => ({ value: [] }))
+  // The test engine raises the mod's spawn with the Agent tool's input and reads the
+  // agent id from the Agent tool's result, hence the casts.
+  on('agent.spawn', async ($, e) => {
+    const input = e as unknown as { subagent_type?: string; description: string }
+    spawned.push({ prompt: e.prompt, subagentType: input.subagent_type })
+    const agentId = `maker-${spawned.length}`
+    return { model: 'opus', agentId, result: { status: 'async_launched', agentId, description: input.description } } as never
+  })
+  on('tool.call', async () => ({ result: 'read it' }))
+  on('tool.check', async () => ({ decision: 'allow' as const }))
+  on('turn.complete', async () => ({ text: '' }))
+  on('ui.blit', async () => ({ value: {} }))
+  on('process.run', async ($, e) => {
+    if (e.argv[0] === 'python3') pngs.push(e.argv[3] ?? '')
+    if (e.argv[0] === 'claude') claudeRuns.push(e.init?.stdin ?? '')
+    return { value: { exitCode: 0, stdout: 'Sat 17:00\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('fs.stat', async ($, e) => ({ value: { kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false, realPath: e.path } }))
+  on('fs.list', async ($, e) => ({
+    value: [...files.keys()]
+      .filter(p => p.startsWith(`${e.path}/`) && !p.slice(e.path.length + 1).includes('/'))
+      .map(p => ({ name: p.slice(e.path.length + 1), kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false })),
+  }))
+  on('fs.read', async ($, e) => ({ value: files.get(e.path) ?? '' }))
+  on('fs.write', async ($, e) => {
+    files.set(e.path, e.text)
+    return { value: undefined }
+  })
+  on('session.start', async ($, e) => ({ cwd: e.cwd }))
+  on('ui.render', async ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return h(Text, { dimColor: true }, 'engine band') as RenderElement
+  })
+
+  await $.session.start({ cwd: '/home/t/proj', surface: 'terminal', isInteractive: true })
+  await $.ui.mount({
+    plugin: 'clawd',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 100, scroll: { offset: 0, bodyRows: 20 }, view: {} },
+    viewport: { columns: 100, rows: 40 },
+  })
+  await clock.advance(200)
+  const run = (args: string) =>
+    $.command.run({ command: 'clawd', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+  // The render tool and the maker's agent id are not in the engine's lists until the mod has loaded once, hence the casts.
+  const call = async (input: Record<string, unknown>) => {
+    const r = await $.tool.call(input as never)
+    return { text: 'result' in r ? String(r.result) : String(r.text ?? ''), isError: 'isError' in r && r.isError === true }
+  }
+
+  // The maker is never offered to a model.
+  expect(await $.agent.offer({ agent: 'clawd:maker', description: '', source: 'plugin', provider: { plugin: 'clawd', tier: 'user' } })).toEqual({ isOffered: false })
+
+  // A new skin: the band's render starts one maker, which is told how to render and look.
+  await run('skin create frog a green frog')
+  await clock.advance(100)
+  expect(spawned.map(s => s.subagentType)).toEqual(['clawd:maker'])
+  expect(spawned[0]?.prompt).toContain('hand it a draft\nas {"draft": {...}}')
+  expect(spawned[0]?.prompt).toContain('Start with 3 drafts side by side')
+  const maker = 'maker-1'
+
+  // It may Read nothing it was not given, and nobody else may render.
+  expect((await call({ tool: 'Read', file_path: '/etc/hostname', agentId: maker })).isError).toBe(true)
+  expect((await call({ tool: 'mcp__clawd__render', draft: OCTOPUS })).isError).toBe(true)
+  // A refused draft says why and draws nothing.
+  const bad = await call({ tool: 'mcp__clawd__render', draft: { color: '#40c060' }, agentId: maker })
+  expect(bad.text).toContain('Draft 1 was refused')
+  expect(pngs.filter(p => p.includes('/frog.r'))).toEqual([])
+  // Drafts side by side go on one sheet; the one rendered alone after that is the one kept.
+  const sheet = await call({ tool: 'mcp__clawd__render', drafts: [OCTOPUS, { ...OCTOPUS, color: '#40c060' }], agentId: maker })
+  expect(sheet.text).toBe(`Rendered 2 drafts to ${data}/skins/previews/frog.r1.png. Read it.`)
+  const alone = await call({ tool: 'mcp__clawd__render', draft: { ...OCTOPUS, color: '#40c060' }, agentId: maker })
+  expect(alone.text).toBe(`Rendered the draft to ${data}/skins/previews/frog.r2.png. Read it.`)
+  expect((await call({ tool: 'Read', file_path: `${data}/skins/previews/frog.r2.png`, agentId: maker })).text).toBe('read it')
+  await $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId: 't1', agentId: maker, reason: 'answer' })
+  await clock.advance(100)
+  const saved = JSON.parse(files.get(`${data}/skins/frog.json`) ?? '{}')
+  expect([saved.name, saved.title, saved.color]).toEqual(['frog', 'a blue octopus', '#40c060'])
+  expect(claudeRuns).toEqual([])
+
+  // A maker that renders nothing in its time is refused from then on, and nothing is saved.
+  await run('act create cartwheel')
+  await clock.advance(100)
+  expect(spawned[1]?.prompt).toContain('{"draft": {"steps": [...]}}')
+  for (let i = 0; i < 31; i++) await clock.advance(30_000)
+  const late = await call({ tool: 'mcp__clawd__render', draft: { steps: [{ do: 'hop' }] }, agentId: 'maker-2' })
+  expect([late.isError, late.text]).toEqual([true, expect.stringContaining('the time for this make is up')])
+  await $.turn.complete({ answer: '', durationMs: 1000, isAborted: false, turnId: 't2', agentId: 'maker-2', reason: 'answer' })
+  await clock.advance(100)
+  expect(files.has(`${data}/acts/cartwheel.json`)).toBe(false)
+  expect((await run(''))?.text).toContain('cartwheel: the maker rendered no usable draft')
+
+  // A maker that rendered but never answers fails too: its last draft is not saved.
+  await run('act create spin')
+  await clock.advance(100)
+  expect((await call({ tool: 'mcp__clawd__render', draft: { steps: [{ do: 'hop' }] }, agentId: 'maker-3' })).isError).toBe(false)
+  for (let i = 0; i < 45; i++) await clock.advance(30_000)
+  expect(files.has(`${data}/acts/spin.json`)).toBe(false)
+  expect((await run(''))?.text).toContain('spin: the maker did not answer in time for spin')
 })

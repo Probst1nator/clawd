@@ -54,7 +54,7 @@ import {
 import type { ActKind, Call, Emote, Playable, Routine, Skin, Step, World } from './clawd-sim'
 import { contextParts, contextRows } from './clawd-context'
 import { ACT_COMMANDS, ALIASES, COMMANDS, EMOTE_COMMANDS, LIST_KINDS, MAX_REPEAT, SKIN_COMMANDS, isClawdDraft, marksFor, menuFor, menuLayout, namesFit, orderOf, writeOut } from './clawd-words'
-import type { ListKind, MadeKind, Menu, Names } from './clawd-words'
+import type { ListKind, MadeKind, Menu, Names, Order } from './clawd-words'
 import { UML_LEGEND, UML_WIDTH, clawdUml, umlKinds } from './clawd-uml'
 import type { UmlKind } from './clawd-uml'
 
@@ -126,6 +126,38 @@ const TOOL_DESCRIPTION = [
 const EMOTE_ROUNDS = 3
 const EMOTE_DRAFTS = 3
 const EMOTE_ROUND_MS = 300_000
+// Since 2026-10-26 one agent makes an act, an emote or a skin instead of the
+// rounds.
+// The mod registers it hidden, as clawd:maker. It hands each draft to the mod's
+// render tool, which checks it and draws the PNG with the mod's own previews,
+// Reads that PNG, and stops when it is satisfied; the mod keeps the last draft
+// that rendered. A tool.check hook lets it Read only the images it is given.
+// That hook only sees the maker when the spawn ran inside a hook of another
+// event (tested 2026-10-26): from a timer, or after the hook returned, every
+// hook of the mod is skipped for that agent. So a make is queued and started
+// from the band's ui.render hook (`spawnQueued`). When that does not happen
+// within MAKER_START_MS, or the spawn is refused, the rounds run as before.
+const RENDER_TOOL = 'mcp__clawd__render'
+const MAKER_TURNS = 40
+const MAKER_MS = 15 * 60_000 // after this the maker's calls are refused, as a subagent cannot be stopped
+const MAKER_GRACE_MS = 2 * 60_000 // then it has this long to answer before the make fails
+const MAKER_START_MS = 5_000
+const NO_ANSWER = 'no answer in time' // the end of a maker that never answered; its last draft is not saved
+// Parent modes the maker was tested under; in any other the spawn is refused and the rounds run.
+const MAKER_MODES = ['default', 'plan', 'auto', 'dontAsk']
+const MAKER_SYSTEM = [
+  'You make one thing for Clawd, the Claude Code logo drawn as a small creature in a terminal band above',
+  'the prompt: a look it takes, a skin it wears, or an act it plays. You work only with two tools:',
+  `${RENDER_TOOL} checks a draft and draws it as a PNG, and Read shows you that PNG.`,
+  `${RENDER_TOOL} is read-only: it only draws a preview image for you to look at, so it is allowed in plan mode too.`,
+  'Never call SubagentHandback: end with a plain text answer of one line, done or failed: <why>.',
+].join(' ')
+// How the maker works on an emote or a skin.
+const MAKER_LOOP = [
+  `How you work: load ${RENDER_TOOL} with ToolSearch (query "select:${RENDER_TOOL}"), then hand it a draft`,
+  'as {"draft": {...}}, or up to 3 drafts side by side as {"drafts": [...]}. It answers the path of a PNG, or',
+  'why a draft was refused. Read the PNG, look at it, fix the draft and render again, as often as it helps.',
+]
 const IMAGE = /\.(png|jpe?g|gif|webp)$/i
 // `/clawd` words no act, emote or skin may be named
 const RESERVED = [
@@ -596,7 +628,8 @@ type Form = 'become' | 'hold' | ''
  * The prompt of one drawing round of an emote or a skin. With `change`, an
  * existing look is changed: `isBefore` marks the first round, whose draft is
  * the look as it is now. `others` lists the other looks of the kind, one line
- * each, for the round that draws the drafts.
+ * each, for the round that draws the drafts. With `isMaker`, it is the task
+ * of the maker agent, which renders and reads its own drafts (MAKER_LOOP).
  */
 function emotePrompt(
   kind: LookKind,
@@ -612,6 +645,7 @@ function emotePrompt(
   drafts: string[] = [],
   form: Form = '',
   others: string[] = [],
+  isMaker = false,
 ): string {
   const poses = PREVIEW_POSES.map((p, i) => `${i + 1}. ${p}`).join('; ')
   const propPoses = PREVIEW_PROP_POSES.map((p, i) => `${PREVIEW_POSES.length + i + 1}. ${p}`).join('; ')
@@ -669,7 +703,9 @@ function emotePrompt(
     ...(isDrafting && others.length > 0
       ? [`Clawd has these other ${isEmote ? 'emotes' : 'skins'}. Draw the new one so that it cannot be taken for any of them:`, ...others, '']
       : []),
-    ...(isDrafting
+    ...(isMaker
+      ? ['A draft is one JSON object:']
+      : isDrafting
       ? [
           `Draw ${EMOTE_DRAFTS} drafts that differ in how they show it: ${differ}. The`,
           'next round sees them side by side and keeps the best. Reply with one JSON object and nothing else,',
@@ -712,9 +748,34 @@ function emotePrompt(
         ]
       : []),
     ...(isEmote ? [...(hasBody ? ['The fields of every look:'] : []), ...EMOTE_EXTRAS] : []),
-    '- done: true once you have seen the preview of this exact JSON and it looks right.',
+    ...(isMaker
+      ? [
+          '',
+          ...MAKER_LOOP,
+          `A single draft renders as a sheet of ${PREVIEW_POSES.length} panels, ${PREVIEW_PER_LINE} per line, each the band as the terminal shows`,
+          `it with Clawd in your look, in these poses: ${poses}.`,
+          ...propLines,
+          ...twiceLines,
+          `Several drafts render as one sheet: line k shows draft k, its number at the left, in ${SHEET_POSES.length} poses:`,
+          `${SHEET_POSES.join('; ')}.`,
+          ...(isTwice ? [`A draft that keeps the body shows them on the skin and then the same ${SHEET_POSES.length} on Clawd's own body.`] : []),
+          ...(draft
+            ? [
+                `The look as it is now: ${draft}`,
+                ...(preview ? [`Its preview is ${preview}. Read it first.`] : []),
+                'Make the change asked for, render it, and check first that the render carries the change.',
+              ]
+            : [`Start with ${EMOTE_DRAFTS} drafts side by side that differ in ${differ}, and keep the one that is easiest to recognise.`]),
+          'Compare each render with the reference image, or with the title when there is none, and fix what makes',
+          'it harder to recognise at this size: silhouette, eyes, legs, arms, proportions. Stop when no change',
+          'would make it clearly more recognisable. The look that is kept is the last draft you rendered alone,',
+          'so render your final draft alone.',
+        ]
+      : ['- done: true once you have seen the preview of this exact JSON and it looks right.']),
     ...(refused ? ['', `Your last draft was refused: ${refused}. Fix that.`] : []),
-    ...(drafts.length > 0 && preview
+    ...(isMaker
+      ? []
+      : drafts.length > 0 && preview
       ? [
           '',
           `Your ${drafts.length} drafts:`,
@@ -844,6 +905,20 @@ async function makeEmote<T extends { name: string; title: string }>(
     preview = await previewLook($, kit, look, `${name}.draft${round}`)
   }
   if (!best) return `no usable draft in ${EMOTE_ROUNDS} rounds: ${refused}`
+  return saveLook($, kit, best, name, why, image, start, replace)
+}
+
+/** Writes a drawn emote or skin and its preview; a changed or redrawn one goes back into its file. */
+async function saveLook<T extends { name: string; title: string }>(
+  $: EngineInterface,
+  kit: Kit<T>,
+  best: T,
+  name: string,
+  why: string,
+  image: string,
+  start?: Change<T>,
+  replace?: T & Dated,
+): Promise<T & Dated> {
   const made = new Date(await $.clock.now()).toISOString()
   // A changed or redrawn look goes back where it was; the old one is kept in data/<kind>s/old/.
   const was = start?.look ?? replace
@@ -970,7 +1045,7 @@ async function drawn<T extends { name: string; title: string }>(
 ): Promise<(T & Dated) | string> {
   let result: (T & Dated) | string
   try {
-    result = await makeEmote($, kit, name, title, why, image, start, form, replace)
+    result = (await makeLookByMaker($, kit, name, title, why, image, start, form, replace)) ?? (await makeEmote($, kit, name, title, why, image, start, form, replace))
   } catch (err) {
     result = String(err)
   } finally {
@@ -988,6 +1063,246 @@ function failed($: EngineInterface, what: string, name: string, why: string): vo
   $.ui.log(`clawd: ${what} ${name} failed: ${why}`, { to: 'debug' })
   $.ui.toast(`Clawd's ${what} ${name} failed; /clawd says why`)
   brain.makeError = `${name}: ${why}`
+}
+
+/** One make the maker agent works on: what its Read may open, how a draft is rendered, and how it ends. */
+type MakerJob = {
+  kind: MadeKind
+  name: string
+  prompt: string
+  reads: Set<string> // exact paths: the reference image and the PNGs it was given
+  render: (draft: unknown, drafts: unknown) => Promise<string>
+  state: 'queued' | 'spawning' | 'running' | 'ended'
+  deadline: number
+  started: (agentId: string | undefined, why: string) => void
+  ended: (answer: string, reason: string) => void
+}
+
+// The maker's working state; a hot reload starts it over, and a maker of the old load is refused everything.
+const maker = {
+  type: '', // `<plugin>:maker` once registered; '' leaves every make to the rounds
+  queue: [] as MakerJob[],
+  jobs: new Map<string, MakerJob>(), // by agentId, while it runs
+  others: new Map<string, boolean>(), // other subagents: whether each is a maker this load did not start
+}
+
+/** How a maker run went: its answer, or why it did not start, in which case the rounds run. */
+type MakerEnd = { isStarted: false; why: string } | { isStarted: true; answer: string; reason: string }
+
+/** Queues a make for `spawnQueued` and asks for a band render; resolves once the maker answered, or did not start. */
+function runMaker($: EngineInterface, kind: MadeKind, name: string, prompt: string, reads: Set<string>, render: MakerJob['render']): Promise<MakerEnd> {
+  if (!maker.type) return Promise.resolve({ isStarted: false, why: 'no maker agent is registered' })
+  return new Promise<MakerEnd>(resolve => {
+    const job: MakerJob = {
+      kind,
+      name,
+      prompt,
+      reads,
+      render,
+      state: 'queued',
+      deadline: 0,
+      started: (agentId, why) => {
+        if (agentId !== undefined || job.state === 'ended') return
+        job.state = 'ended'
+        resolve({ isStarted: false, why })
+      },
+      ended: (answer, reason) => {
+        if (job.state === 'ended') return
+        job.state = 'ended'
+        for (const [id, j] of maker.jobs) if (j === job) maker.jobs.delete(id)
+        resolve({ isStarted: true, answer, reason })
+      },
+    }
+    maker.queue.push(job)
+    $.ui.invalidate('ui.render')
+    $.clock.after(MAKER_START_MS, () => {
+      if (job.state !== 'queued') return
+      maker.queue = maker.queue.filter(j => j !== job)
+      job.started(undefined, `not started within ${MAKER_START_MS / 1000} s, so no band was drawn`)
+    })
+    // A maker that never answers (a stall, a reload) fails the make; the rounds do not run then.
+    $.clock.after(MAKER_START_MS + MAKER_MS + MAKER_GRACE_MS, () => job.ended('', NO_ANSWER))
+  })
+}
+
+/**
+ * Starts the queued makes, from the band's ui.render hook: only a spawn made
+ * inside a hook leaves the maker's tool calls to this mod's tool.check and
+ * tool.call hooks. Never call it from a timer or after a hook returned.
+ */
+async function spawnQueued($: EngineInterface): Promise<void> {
+  for (let job = maker.queue.shift(); job; job = maker.queue.shift()) {
+    job.state = 'spawning'
+    let why = ''
+    try {
+      const now = await $.clock.now()
+      const r = await $.agent.spawn({ subagentType: maker.type, prompt: job.prompt, description: `clawd: ${job.kind} ${job.name}` })
+      if ('agentId' in r && r.agentId) {
+        // Ended while the spawn ran (its time ran out): it stays out of the jobs, so the stray check refuses its calls.
+        if ((job.state as MakerJob['state']) === 'ended') continue
+        job.deadline = now + MAKER_MS
+        maker.jobs.set(r.agentId, job)
+        job.state = 'running'
+        job.started(r.agentId, '')
+        continue
+      }
+      why = 'deny' in r ? String(r.deny) : 'no agent id'
+    } catch (err) {
+      why = err instanceof Error ? err.message : String(err)
+    }
+    job.started(undefined, why)
+  }
+}
+
+/** The verdict on a call in a maker's loop: render, ToolSearch, and Read of the exact files it was given; nothing after its time. */
+function makerVerdict(job: MakerJob, tool: string, input: Record<string, unknown>, now: number): { decision: 'allow' } | { decision: 'deny'; reason: string } {
+  if (now > job.deadline) return { decision: 'deny', reason: 'clawd: the time for this make is up; answer now with one line.' }
+  if (tool === RENDER_TOOL || tool === 'ToolSearch') return { decision: 'allow' }
+  if (tool === 'Read' && typeof input.file_path === 'string' && job.reads.has(input.file_path)) return { decision: 'allow' }
+  return { decision: 'deny', reason: `clawd: the maker may only call ${RENDER_TOOL} and Read the files it was given.` }
+}
+
+/** Whether a subagent this load did not start is a maker, of an earlier load; asked once per agent. */
+async function isStrayMaker($: EngineInterface, agentId: string): Promise<boolean> {
+  const known = maker.others.get(agentId)
+  if (known !== undefined) return known
+  const isMaker = (await $.agent.list()).find(a => a.id === agentId)?.type === maker.type
+  maker.others.set(agentId, isMaker)
+  return isMaker
+}
+
+/** What a maker run came to: the made thing's draft, why it failed, or undefined when it did not start. */
+function makerOutcome(end: MakerEnd, name: string, hasDraft: boolean): string | undefined {
+  if (!end.isStarted) return undefined
+  // A draft is kept only through the render tool, which answers only in a confined maker's loop.
+  if (!hasDraft) return `the maker rendered no usable draft (${end.reason}): ${oneLine(end.answer, 200) || 'no answer'}`
+  if (end.reason === NO_ANSWER) return `the maker did not answer in time for ${name}`
+  if (/^failed\b/i.test(end.answer.trim())) return `the maker gave up on ${name}: ${oneLine(end.answer, 200)}`
+  return ''
+}
+
+/**
+ * The maker draws an emote or a skin, rendering to previews/<name>.r<N>.png;
+ * with `start` it changes that look, with `replace` it draws it again. The
+ * look, why it failed, or undefined when the maker did not start.
+ */
+async function makeLookByMaker<T extends { name: string; title: string }>(
+  $: EngineInterface,
+  kit: Kit<T>,
+  name: string,
+  title: string,
+  why: string,
+  image: string,
+  start?: Change<T>,
+  form: Form = '',
+  replace?: T & Dated,
+): Promise<(T & Dated) | string | undefined> {
+  if (!maker.type) return undefined
+  const others = start ? [] : (await loadLooks($, kit)).filter(l => l.name !== name).map(l => `- ${l.name}: ${oneLine(kit.what(l), 100)}`)
+  const draft = start ? JSON.stringify(kit.json(start.look)) : ''
+  const before = start ? await previewLook($, kit, start.look, `${name}.before`) : ''
+  const reads = new Set([image, before].filter(Boolean))
+  let last = null as T | null // the last draft rendered alone
+  let n = 0
+  const render = async (one: unknown, several: unknown): Promise<string> => {
+    const looks = (Array.isArray(several) ? several.slice(0, EMOTE_DRAFTS) : [one]).map(d => lookFrom(kit, d, name, title))
+    const good = looks.filter((l): l is T => typeof l !== 'string')
+    const notes = looks.flatMap((l, i) => (typeof l === 'string' ? [`Draft ${i + 1} was refused: ${l}.`] : []))
+    if (good.length === 0) return notes.join(' ') || 'No draft: give one as {"draft": {...}} or up to 3 as {"drafts": [...]}.'
+    n += 1
+    let path = `${mod.dataDir}/${kit.kind}s/previews/${name}.r${n}.png`
+    if (good.length > 1) await writeBytes($, path, kit.sheet(good))
+    else {
+      last = good[0] as T
+      path = await previewLook($, kit, last, `${name}.r${n}`)
+    }
+    reads.add(path)
+    return [`Rendered ${good.length > 1 ? `${good.length} drafts` : 'the draft'} to ${path}. Read it.`, ...notes].join(' ')
+  }
+  const prompt = emotePrompt(kit.kind, name, title, why, image, draft, before, '', start?.text, start !== undefined, [], form, others, true)
+  const end = await runMaker($, kit.kind, name, prompt, reads, render)
+  const outcome = makerOutcome(end, name, last !== null)
+  if (outcome === undefined) {
+    $.ui.log(`clawd: the maker did not start for ${name} (${end.isStarted ? '' : end.why}); the rounds run`, { to: 'debug' })
+    return undefined
+  }
+  if (outcome || !last) return outcome
+  return saveLook($, kit, last, name, why, image, start, replace)
+}
+
+/** The maker writes an act, rendering to acts/previews/<name>.r<N>.png; as makeAct, or undefined when the maker did not start. */
+async function makeActByMaker(
+  $: EngineInterface,
+  name: string,
+  title: string,
+  why: string,
+  made: Routine[],
+  emotes: Emote[],
+  skins: Skin[],
+  change?: ActChange,
+  replace?: MadeAct,
+): Promise<MadeAct | string | undefined> {
+  if (!maker.type) return undefined
+  const find = finder(made, emotes, skins)
+  const reads = new Set<string>()
+  let last = null as Routine | null // the last version that rendered
+  let n = 0
+  const render = async (one: unknown): Promise<string> => {
+    const steps = typeof one === 'object' && one !== null ? (one as Record<string, unknown>).steps : undefined
+    const routine = routineFrom({ name, title, steps })
+    if (typeof routine === 'string') return `The steps were refused: ${routine}.`
+    n += 1
+    const path = `${mod.dataDir}/acts/previews/${name}.r${n}.png`
+    const { png, frames } = actPreview(linkRoutine(routine, find), mod.skin)
+    await writeBytes($, path, png)
+    reads.add(path)
+    last = routine
+    return `Rendered the act in ${frames} frames to ${path}. Read it.`
+  }
+  const prompt = makePrompt(name, title, why, made.filter(r => r.name !== name), emotes, skins, change, MAKER_ACT_END)
+  const end = await runMaker($, 'act', name, prompt, reads, render)
+  const outcome = makerOutcome(end, name, last !== null)
+  if (outcome === undefined) {
+    $.ui.log(`clawd: the maker did not start for ${name} (${end.isStarted ? '' : end.why}); the text call runs`, { to: 'debug' })
+    return undefined
+  }
+  if (outcome || !last) return outcome
+  return saveAct($, last, name, why, change, replace)
+}
+
+/** Registers the maker agent and its render tool; without them every make runs the rounds. */
+async function registerMaker($: EngineInterface): Promise<void> {
+  try {
+    await $.tool.register({
+      name: 'render',
+      description:
+        "Clawd's maker only: checks a draft of a look or an act and draws it as a PNG, answering the PNG's path or why the draft was refused. Read-only: it writes nothing but the preview.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          draft: { type: 'object', description: 'One draft: a look as JSON, or {"steps": [...]} for an act.' },
+          drafts: { type: 'array', items: { type: 'object' }, description: 'Up to 3 drafts of a look, drawn side by side.' },
+        },
+      },
+      isDeferred: true,
+    })
+    const r = await $.agent.register({
+      name: 'maker',
+      description: 'Makes one act, emote or skin for the clawd mod and checks its renders. Started by the mod only.',
+      prompt: MAKER_SYSTEM,
+      tools: ['Read', 'ToolSearch', RENDER_TOOL],
+      model: MAKE_MODEL,
+      effort: 'medium',
+      permissionMode: 'dontAsk',
+      maxTurns: MAKER_TURNS,
+      omitClaudeMd: true,
+      background: true,
+    })
+    maker.type = r.agent
+  } catch (err) {
+    maker.type = ''
+    $.ui.log(`clawd: the maker agent was not registered, so makes run the rounds: ${err instanceof Error ? err.message : String(err)}`, { to: 'debug' })
+  }
 }
 
 /** With `/clawd trace`, keeps the pick in data/picks/<session id>.jsonl, the last TRACE_MAX. */
@@ -1155,7 +1470,25 @@ function plainSteps(r: Routine): Step[] {
   return r.steps.map(({ worn: _worn, inner: _inner, ...rest }) => rest)
 }
 
-function makePrompt(name: string, title: string, why: string, made: Routine[], emotes: Emote[], skins: Skin[], change?: ActChange): string {
+// How the maker works on an act, in place of the reply the text call gives.
+const MAKER_ACT_END = [
+  `At most 12 steps. Load ${RENDER_TOOL} with ToolSearch (query "select:${RENDER_TOOL}"), then hand it each`,
+  'version as {"draft": {"steps": [...]}}. It answers the path of a PNG, or why the steps were refused: the',
+  `band every ${ACT_PREVIEW_EVERY_S} s while the act plays, one frame per line from top to bottom. Read it, check that the act reads`,
+  'as its title and that Clawd stays on the band, fix the steps and render again, as often as it helps.',
+  'The act that is kept is the last version that rendered.',
+].join('\n')
+
+function makePrompt(
+  name: string,
+  title: string,
+  why: string,
+  made: Routine[],
+  emotes: Emote[],
+  skins: Skin[],
+  change?: ActChange,
+  end = 'At most 12 steps. Return {"steps": [...]}.',
+): string {
   const names = (items: { name: string; title: string }[]) => items.map(x => `${x.name} ("${oneLine(x.title, 60)}")`).join(', ') || 'none yet'
   return [
     change ? 'Change the steps of an act.' : 'Write the steps for a new act.',
@@ -1205,7 +1538,7 @@ function makePrompt(name: string, title: string, why: string, made: Routine[], e
     `  Skins, which turn Clawd into them: ${names(skins)}.`,
     "- play {name}: plays a made act's steps here. Inside it, that act's own play steps are skipped.",
     `  Made acts: ${names(made)}.`,
-    'At most 12 steps. Return {"steps": [...]}.',
+    end,
   ].join('\n')
 }
 
@@ -1237,6 +1570,11 @@ async function makeAct(
   if (!answer.isAnswered) return answer.reason
   const routine = routineFrom({ name, title, steps: parseJson(answer.text)?.steps })
   if (typeof routine === 'string') return `${routine}; Opus wrote: ${oneLine(answer.text, 300)}`
+  return saveAct($, routine, name, why, change, replace)
+}
+
+/** Writes an act a model wrote; a changed or rewritten one goes back into its file, the old file into data/acts/old/. */
+async function saveAct($: EngineInterface, routine: Routine, name: string, why: string, change?: ActChange, replace?: MadeAct): Promise<MadeAct> {
   const act: MadeAct = { ...routine, made: new Date(await $.clock.now()).toISOString(), project: mod.project, why }
   const file = `${mod.dataDir}/acts/${name}.json`
   if (change || replace) await $.fs.write(await oldPath($, 'act', name), await $.fs.read(file))
@@ -1249,11 +1587,12 @@ async function makeAct(
  * plays on `who` when done. With `change` a made act is changed, with
  * `replace` written again from scratch.
  */
-function startAct($: EngineInterface, name: string, title: string, why: string, who: string, change?: ActChange, replace?: MadeAct): void {
+function startAct($: EngineInterface, name: string, title: string, why: string, who: string, change?: ActChange, replace?: MadeAct, called: Called[] = []): void {
   brain.making = name
   const w = clawd.world
   const label = change ? ` · changing ${name}: "${change.text}"` : replace ? ` · writing ${name} again` : ` · new act coming: "${title}"`
-  if (w) callLabel(w, [], label)
+  // A pick's own calls stay in the label beside the note.
+  if (w) callLabel(w, called, label)
   $.clock.after(1, () => void writeAct($, name, title, why, who, change, replace))
 }
 
@@ -1263,7 +1602,7 @@ async function writeAct($: EngineInterface, name: string, title: string, why: st
   const skins = await loadSkins($)
   let result: MadeAct | string
   try {
-    result = await makeAct($, name, title, why, made, emotes, skins, change, replace)
+    result = (await makeActByMaker($, name, title, why, made, emotes, skins, change, replace)) ?? (await makeAct($, name, title, why, made, emotes, skins, change, replace))
   } catch (err) {
     result = String(err)
   } finally {
@@ -1439,21 +1778,11 @@ async function pick($: EngineInterface, w: World, trigger: string, now: number):
     else startEmote($, name, title, why, image, 'clawd', undefined, form)
     return traced(answer.text, `${playing}; new ${kind} ${name}${form === 'skin' ? '' : ` (${form})`} being drawn${image ? ` after ${image}` : ''}`)
   }
-  // An act /clawd act create or change is writing has no file yet; a second write would race it.
-  if (brain.making === name) return traced(answer.text, `${playing}; new act ${name} asked, but it is still being made`)
-  callLabel(w, called, ` · new act coming: "${title}"`)
-  const result = await makeAct($, name, title, why, made, emotes, skins)
-  if (typeof result === 'string') {
-    callLabel(w, called, ' · new act failed')
-    $.ui.log(`clawd: new act ${name} failed: ${result}`, { to: 'debug' })
-    return traced(answer.text, `${playing}; new act ${name} failed: ${result}`)
-  }
-  // The file keeps the names; the act plays with its emote and play steps linked, an emote step to a skin too.
-  callActs(w, [{ who: target, what: linkRoutine(result, finder(made, emotes, skins)), delay: 0 }])
-  callLabel(w, [{ who: target, name: `${name} (new) "${title}"` }])
-  brain.recent = [`${target}: ${name}`, ...brain.recent].slice(0, 8)
-  brain.last = { trigger, calls: [{ who: target, name, delay: 0 }], why, at: now, made: result }
-  return traced(answer.text, `${playing}; new act ${name} made`)
+  // One model makes one thing at a time; an act being written has no file yet, so a second write would race it.
+  if (brain.making) return traced(answer.text, `${playing}; new act ${name} asked, but ${brain.making} is still being made`)
+  // Written in the background since 2026-10-26, as a look is drawn, so the picks go on while the maker works.
+  startAct($, name, title, why, target, undefined, undefined, called)
+  return traced(answer.text, `${playing}; new act ${name} being written`)
 }
 
 /** What a `/clawd` word may name now: the minis on screen, the emotes, the skins, the made acts, the built-in acts. */
@@ -1815,7 +2144,7 @@ async function lookCommand<T extends { name: string; title: string }>(
     if (taken.includes(name)) return `Clawd: ${name} is taken; pick another name.`
     begin(name, title, `asked for with /clawd ${kind} create`, image)
     const by = named && named.name !== first ? ` (named by ${NAME_MODEL})` : ''
-    return `Clawd: a model draws ${name}${by}${image ? ` after ${image}` : ''}, in up to ${EMOTE_ROUNDS} rounds of a minute or two; ${whenDone}.`
+    return `Clawd: a model draws ${name}${by}${image ? ` after ${image}` : ''}, in a few minutes; ${whenDone}.`
   }
   const look = looks.find(x => x.name === arg)
   if ((verb === 'change' || verb === 'delete') && !look) return `Clawd: ${arg ?? ''} is gone.`
@@ -1849,10 +2178,10 @@ async function lookCommand<T extends { name: string; title: string }>(
       // Nothing to change: the look is drawn again from scratch, from its title and reference
       // image, as create draws a new one.
       begin(look.name, look.title, why, look.image, undefined, look)
-      return `Clawd: a model draws ${look.name} again from scratch after "${oneLine(look.title, 80)}", in up to ${EMOTE_ROUNDS} rounds of a minute or two; ${after}. ${old}`
+      return `Clawd: a model draws ${look.name} again from scratch after "${oneLine(look.title, 80)}", in a few minutes; ${after}. ${old}`
     }
     begin(look.name, look.title, why, image || look.image, { look, text })
-    return `Clawd: a model changes ${look.name}: "${text}", in up to ${EMOTE_ROUNDS} rounds of a minute or two; ${after}. ${old}`
+    return `Clawd: a model changes ${look.name}: "${text}", in a few minutes; ${after}. ${old}`
   }
   return undefined
 }
@@ -2086,11 +2415,39 @@ async function clawdRun($: EngineInterface, args: string, columns: number, isMod
   return (await lookCommand($, EMOTE_KIT, arg ?? '', order.rest.slice(1), names, begin)) ?? (await clawdStatus($))
 }
 
+/** Whether a /clawd command changes something: all but the status, lists, help, plays, the skin shown and previews. */
+function changes(order: Order): boolean {
+  if (order.kind !== 'command' || order.name === 'help') return false
+  const [arg] = order.rest
+  return !((order.name === 'act' || order.name === 'emote' || order.name === 'skin') && (arg === undefined || arg === 'preview'))
+}
+
+/**
+ * Why the clawd tool refuses a command a model runs, or '' to run it. The
+ * tool's own answer comes before the engine's permission check (found
+ * 2026-10-26), so a command that changes something asks that check here.
+ * On an ask the person decides.
+ */
+async function gateTool($: EngineInterface, args: string): Promise<string> {
+  if (!changes(orderOf(args.split(/\s+/).filter(Boolean), await loadNames($)))) return ''
+  const command = `/clawd ${args}`.trim()
+  try {
+    const check = await $.tool.check({ tool: CLAWD_TOOL, input: { command } })
+    if (check.decision === 'allow') return ''
+    if (check.decision === 'deny') return `Clawd: ${command} is not allowed here${check.reason ? `: ${check.reason}` : '.'}`
+    const answer = await $.ui.ask(`A model wants to run ${command}. Allow it?`, { options: ['Allow', 'Refuse'], header: 'clawd' })
+    return answer === 'Allow' ? '' : `Clawd: the person refused ${command}.`
+  } catch (err) {
+    return `Clawd: ${command} was not run, as its permission check failed: ${err instanceof Error ? err.message : String(err)}`
+  }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     mod.isOff = (await $.env.get('CLAUDE_CLAWD_OFF')) === '1' || !e.isInteractive
     // The tool is registered before next(e), as the engine's own example does.
     if (!mod.isOff) await registerTool($)
+    if (!mod.isOff) await registerMaker($)
     const started = await next(e)
     if (mod.isOff) return started
     const seed = Number(await $.env.get('CLAUDE_CLAWD_SEED'))
@@ -2162,8 +2519,38 @@ export const register: Register = on => {
     return { ...box, text, cursor, decorations: [...(typed ? [] : (box.decorations ?? [])), ...marks] }
   })
 
-  // A subagent started: a mini Clawd for it, while it runs.
+  // The maker is the mod's own: never offered to a model.
+  on('agent.offer', async ($, e, next) => (maker.type && e.agent === maker.type ? { isOffered: false } : next(e))).catch(($, e, next) =>
+    e.agent === `${$.plugin.name}:maker` ? { isOffered: false } : next(e),
+  )
+
+  // The maker's calls, and the Agent check of the mod's own maker spawn. Every
+  // other call passes at once. A failure refuses a maker's call.
+  on('tool.check', async ($, e, next) => {
+    const job = e.agentId === undefined ? undefined : maker.jobs.get(e.agentId)
+    if (job) return makerVerdict(job, e.tool, e.input as Record<string, unknown>, await $.clock.now())
+    if (e.tool === RENDER_TOOL) return { decision: 'deny', reason: `clawd: ${RENDER_TOOL} is for the mod's maker only.` }
+    // The mod may start its own maker in plan and auto mode, where the
+    // classifier gives no verdict for a spawn no model asked for.
+    if (e.tool === 'Agent' && maker.type && next.origin.plugin === $.plugin.name && (e.input as { subagent_type?: unknown }).subagent_type === maker.type) {
+      return { decision: 'allow' }
+    }
+    if (e.agentId !== undefined && maker.type && (await isStrayMaker($, e.agentId))) {
+      return { decision: 'deny', reason: 'clawd: this maker was started before the mod reloaded; answer now with one line.' }
+    }
+    return next(e)
+  }).catch(($, e, next) =>
+    (e.agentId !== undefined && maker.jobs.has(e.agentId)) || e.tool === RENDER_TOOL
+      ? { decision: 'deny', reason: 'clawd: the check of a maker call failed.' }
+      : next(e),
+  )
+
+  // A subagent started: a mini Clawd for it, while it runs. The maker runs only
+  // under the parent modes it was tested under.
   on('agent.spawn', async ($, e, next) => {
+    if (maker.type && e.subagentType === maker.type && e.permissionMode !== undefined && !MAKER_MODES.includes(e.permissionMode)) {
+      return { deny: `clawd: the maker does not run in ${e.permissionMode} mode` }
+    }
     const started = await next(e)
     const w = clawd.world
     if (mod.isOff || !w || started.agentId === undefined) return started
@@ -2190,6 +2577,9 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
+    // A maker's answer ends its make; the save runs in the chain that waits for it.
+    const job = e.agentId === undefined ? undefined : maker.jobs.get(e.agentId)
+    if (job) job.ended(e.answer, e.reason)
     if (mod.isOff) return result
     if (e.agentId !== undefined) {
       // A subagent's answer: its mini says goodbye and runs off.
@@ -2221,7 +2611,24 @@ export const register: Register = on => {
   on('tool.call', { tool: new RegExp(`^${CLAWD_TOOL}$`) }, async ($, e) => {
     const { command } = e as unknown as { command?: unknown } // a tool's input fields sit on the event
     const args = typeof command === 'string' ? command.trim().replace(/^\/clawd(\s+|$)/, '') : ''
+    const refused = await gateTool($, args)
+    if (refused) return { result: refused, isError: true }
     return { result: await clawdRun($, args, UML_WIDTH, true) }
+  })
+
+  // The render tool: a maker's draft, checked and drawn. This answer comes
+  // before the engine's permission check, so it checks the maker and its time itself.
+  on('tool.call', { tool: new RegExp(`^${RENDER_TOOL}$`) }, async ($, e) => {
+    const job = e.agentId === undefined ? undefined : maker.jobs.get(e.agentId)
+    if (!job) return { result: `clawd: ${RENDER_TOOL} is for the mod's maker only.`, isError: true }
+    const verdict = makerVerdict(job, RENDER_TOOL, {}, await $.clock.now())
+    if (verdict.decision === 'deny') return { result: verdict.reason, isError: true }
+    const { draft, drafts } = e as unknown as { draft?: unknown; drafts?: unknown } // a tool's input fields sit on the event
+    try {
+      return { result: await job.render(draft, drafts) }
+    } catch (err) {
+      return { result: `clawd: the render failed: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+    }
   })
 
   // /clawd help uml in colour. The stored row keeps the plain text the model reads.
@@ -2242,6 +2649,8 @@ export const register: Register = on => {
   // Above the prompt: whatever the engine draws there, then Clawd's runway,
   // then the /clawd menu while one is typed.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    // A queued make starts here, inside a hook, so its maker stays confined (spawnQueued).
+    if (maker.queue.length > 0) await spawnQueued($)
     if (mod.isOff || e.surface !== 'terminal' || e.props.hasSurvey) return next(e)
     const rows = Math.min(await read($, clawdRows), e.props.maxRows)
     const columns = Math.min(CLAWD_MAX_COLUMNS, e.props.bodyColumns)

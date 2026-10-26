@@ -28,7 +28,7 @@ Start a new session. `/clawd help` explains the rest. `/clawd off` hides Clawd (
 stays hidden in later sessions until `/clawd on`), and
 `claude plugin disable clawd@clawd` turns the mod off.
 
-Tested with Claude Code 2.1.292. The mod uses plugin hooks that draw into the terminal,
+Tested with Claude Code 2.1.310. The mod uses plugin hooks that draw into the terminal,
 so older versions may not load it.
 
 ## Commands
@@ -79,6 +79,14 @@ sentence such as `/clawd skin create claude with glasses`, Haiku picks the name.
 change one; with nothing after the name, they make it again from scratch. Each runs when
 you type it, or when Claude runs it through the clawd tool (below).
 
+Opus makes each one as a background subagent of your session, the maker. It hands its
+drafts to a render tool of the mod, looks at the preview images and fixes them until it is
+satisfied, for up to 15 minutes; a small Clawd shows it working. The mod saves the last
+draft the maker looked at. The maker can read only the reference image and its own
+previews, and writes no file itself. In plan and auto mode the mod lets its own maker
+start. Where the maker cannot start, the mod falls back to up to three `claude -p` rounds
+for a look and one model call for an act.
+
 ## Claude can control Clawd
 
 The mod gives the session's Claude one tool, `mcp__clawd__clawd`, which takes any
@@ -86,6 +94,8 @@ The mod gives the session's Claude one tool, `mcp__clawd__clawd`, which takes an
 when Claude asks for it, so until then it costs one line of context. Ask Claude to have
 Clawd wave, or to make a new act, and it can do it itself. A create or change Claude
 starts waits for the same limit of 5 a day as the autopicker's; one you type does not.
+A command from Claude that changes something (anything but playing, listing, help and
+previews) goes through your permission settings first, and where they ask, you decide.
 
 ## Where it keeps things
 
