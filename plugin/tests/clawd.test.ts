@@ -776,7 +776,7 @@ test('an emote is checked, Clawd turns into it with a puff, keeps the tall band 
   expect(emoteFrom({ ...OCTOPUS, name: 'jump' })).toBe('jump is a built-in act')
   expect(emoteFrom({ ...OCTOPUS, color: 'blue' })).toBe('bad color "blue", want #rrggbb')
   expect(emoteFrom({ ...OCTOPUS, tall: false, legLength: 3, shapes: { normal: ['##', '##', '##', '##'] } })).toBe(
-    'normal is 7 high with its legs, at most 6 (8 with "tall": true)',
+    'normal is 7 high with its legs, at most 6 (14 with "tall": true)',
   )
   const look = emoteFrom(OCTOPUS) as Emote
   expect(look.body?.shapes.stretch).toEqual(OCTOPUS.shapes.normal)
@@ -1138,6 +1138,9 @@ test('the autopicker asks haiku until /clawd autopick sonnet or opus switches th
   expect((await run('autopick haiku'))?.text).toBe('Clawd: the autopicker uses haiku (remembered).')
   expect((await run(''))?.text).toContain('Picker model: haiku.')
 })
+
+// How many rows a preview's panels are, from the PNG's height: 3 lines 4 pixels apart, a row 20 pixels.
+const tallPreviewRows = (png: Uint8Array) => ((new DataView(png.buffer, png.byteOffset, png.byteLength).getUint32(20) - 4) / 3 - 4) / 20
 
 test('an emote preview is a PNG of the band in every pose, and a drafts sheet has a numbered line per draft', async () => {
   const png = emotePreview(emoteFrom(OCTOPUS) as Emote)
@@ -2177,6 +2180,31 @@ test('while Remote Control is on, Clawd wears a gray antenna on the back edge of
   spawnMini(v, 'agent-1', 'a task', 'general-purpose')
   v.antenna = false
   expect(cellsWith(frameCells(v), 30, 0xa8a8a8)).toEqual([])
+})
+
+test('a tall look up to 14 sub-pixels high grows the band to the rows it needs, and does not play where they are missing', () => {
+  const look = (high: number) => emoteFrom({ name: 'owl', title: 'an owl', color: '#123456', shapes: { normal: Array.from({ length: high }, () => '######') }, legLength: 0, tall: true, dur: 8 })
+  expect(look(15)).toBe('normal is 15 high with its legs, at most 14')
+  const owl = look(14) as Emote
+  const playIn = (maxRows: number) => {
+    const w = createWorld(40, 4, seeded(1))
+    w.queue = []
+    w.x = 40
+    perform(w, owl)
+    for (let i = 0; i < 12; i++) {
+      step(w)
+      if (w.rows !== Math.min(bandRows(w), maxRows)) resize(w, 40, Math.min(bandRows(w), maxRows))
+    }
+    return w
+  }
+  const w = playIn(99)
+  expect(w.wearing).toBe(owl)
+  expect(w.rows).toBe(8)
+  // A sub-pixel stays free above the head, in the first cell row.
+  expect(rows(frameCells(w), 40)[0]?.trim()).toMatch(/^[▗▄▖]+$/)
+  expect(playIn(7).wearing).toBeNull()
+  expect(tallPreviewRows(emotePreview(owl))).toBe(8)
+  expect(tallPreviewRows(emotePreview(look(8) as Emote))).toBe(5)
 })
 
 test('the mod reads Remote Control from the environment every second and puts the antenna on and takes it off', async ($, on) => {

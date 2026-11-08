@@ -63,8 +63,8 @@ import type { UmlKind } from './clawd-uml'
 // behaviours are in clawd-sim.ts). Logo-style
 // quadrant blocks, Clawd standing on a floor line at the band's bottom, two
 // sub-pixels of headroom above him (BAND_ROWS), and a row more (TALL_ROWS)
-// during big jumps; two more (ANTENNA_ROWS) while he wears the Remote Control
-// antenna on a tall look. With only 3 rows to spare he bounces in place. The
+// during big jumps; on a tall look the rows it needs (`bandRows`), and one more
+// with the Remote Control antenna. With only 3 rows to spare he bounces in place. The
 // band shows at any size the engine gives it, cut off where it is too small.
 const MENU_MIN_COLUMNS = 20
 const CLAWD_MAX_COLUMNS = 512 // the Raster limit

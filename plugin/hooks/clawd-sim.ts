@@ -27,8 +27,6 @@ const LAYERS = [4, 3, 2, 1] // bricks per pile layer, bottom up, as far as the b
 /** The band's height in rows, and its height while a body does a big jump. */
 export const BAND_ROWS = 4
 export const TALL_ROWS = 5
-/** The band's height while Clawd wears a tall look and the Remote Control antenna. */
-export const ANTENNA_ROWS = 6
 const TALL_HOLD_S = 0.6 // the band stays tall this long after a big jump, so a second one does not resize it
 export const READ_HOLD_S = 1.2 // the scroll stays up this long after the last reading call
 
@@ -167,7 +165,7 @@ export type Skin = {
   isWiggly: boolean // the legs sway like tentacles and crawl in a ripple instead of stepping
   armRow: number | null // the normal shape's row the arms grow from; null: no arms
   armPoses: Record<ArmPose, [number, number][]> // [dx, dy] from the body's edge, as Clawd's
-  isTall: boolean // the band grows a row while Clawd wears it, as for a big jump
+  isTall: boolean // the band grows while Clawd wears it, as for a big jump
 }
 
 /**
@@ -180,7 +178,7 @@ export type Emote = {
   name: string
   title: string
   accent: number // the colour of `+` pixels in the body, the prop and the tool
-  isTall: boolean // the band grows a row while Clawd wears it, as for a big jump
+  isTall: boolean // the band grows while Clawd wears it, as for a big jump
   body: Skin | null // the body it gives Clawd for its time; null: Clawd keeps the one it has
   dur: number // seconds it stays on when played
   prop: Prop | null
@@ -632,10 +630,20 @@ export function wantsTall(w: World): boolean {
   return w.t < w.tallUntil
 }
 
-/** The band's height in rows that the world wants now: a row more while tall, two with the antenna on a tall look. */
+/** The rows a body needs: its height, a sub-pixel free above its head, its feet on the last row's upper half. At least the tall band. */
+function tallRows(body: Skin | null): number {
+  if (!body) return TALL_ROWS
+  const high = Math.max(...SHAPE_NAMES.map(shape => body.shapes[shape].length + (shape === 'normal' || shape === 'stretch' ? body.legLength : 0)))
+  return Math.max(TALL_ROWS, Math.ceil((high + 2) / 2))
+}
+
+/** The band's height in rows that the world wants now: a row more while tall; on a tall look what it needs, and a row more with the antenna. */
 export function bandRows(w: World): number {
   if (!wantsTall(w)) return BAND_ROWS
-  return w.antenna && shownLook(w, w)?.isTall ? ANTENNA_ROWS : TALL_ROWS
+  // A look about to go on needs its rows before it shows.
+  const next = w.act?.emote?.isTall ? w.act.emote.body : null
+  const look = next ?? shownLook(w, w)
+  return look?.isTall ? tallRows(look) + (w.antenna ? 1 : 0) : TALL_ROWS
 }
 
 /** `/clawd [who] <act> [n]`: do it now, `n` times in a row; false when `who` is not there. */
@@ -797,7 +805,7 @@ export function routineFrom(raw: unknown): Routine | string {
   return { name, title, steps }
 }
 
-const EMOTE_MAX_W = 20 // sub-pixels, the arms come on top
+export const EMOTE_MAX_W = 20 // sub-pixels, the arms come on top
 // Clawd's arms: [dx, dy] from the body's edge on the arm row.
 const CLAWD_ARMS: Record<ArmPose, [number, number][]> = {
   out: [[1, 0], [2, 0]],
@@ -806,9 +814,10 @@ const CLAWD_ARMS: Record<ArmPose, [number, number][]> = {
   raised: [[1, -1], [1, -2]],
 }
 // High with the legs, so a sub-pixel stays free above the head: in the 4-row
-// band, and in the 5-row band for a tall emote.
-const EMOTE_MAX_H = 6
-const TALL_EMOTE_MAX_H = 8
+// band, and in the 8-row band for a tall emote. The autopicker's makers are told 8 (register.tsx).
+export const EMOTE_MAX_H = 6
+export const TALL_EMOTE_MAX_H = 14
+const TALL_PROP_MAX_H = 8
 const PROP_MAX_W = 8
 const PROP_MAX_KEYS = 8
 const PROP_MAX_Y = 24 // sub-pixels; past about 10 the prop has left the band
@@ -837,7 +846,7 @@ function propOf(raw: unknown, isTall: boolean, dur: number, accent: number): Pro
   if (!rows) return 'no rows'
   const wide = Math.max(...rows.map(line => line.length))
   if (wide > PROP_MAX_W) return `rows are ${wide} wide, at most ${PROP_MAX_W}`
-  const maxH = isTall ? TALL_EMOTE_MAX_H : EMOTE_MAX_H
+  const maxH = isTall ? TALL_PROP_MAX_H : EMOTE_MAX_H
   if (rows.length > maxH) return `rows are ${rows.length} high, at most ${maxH}`
   const color = r.color === undefined ? accent : colorOf(r.color)
   if (color === undefined) return `bad color ${JSON.stringify(r.color)}, want #rrggbb`
@@ -911,7 +920,7 @@ export function skinFrom(raw: unknown): Skin | string {
     const wide = Math.max(...lines.map(line => line.length))
     if (wide > EMOTE_MAX_W) return `${shape} is ${wide} wide, at most ${EMOTE_MAX_W}`
     const high = lines.length + (shape === 'normal' || shape === 'stretch' ? legLength : 0)
-    if (high > maxH) return `${shape} is ${high} high with its legs, at most ${maxH}${isTall ? '' : ' (8 with "tall": true)'}`
+    if (high > maxH) return `${shape} is ${high} high with its legs, at most ${maxH}${isTall ? '' : ` (${TALL_EMOTE_MAX_H} with "tall": true)`}`
     shapes[shape] = lines
   }
   const nw = Math.max(...normal.map(line => line.length))
@@ -1531,9 +1540,10 @@ function runAct(w: World, c: Body, a: Act): boolean {
       if (isAirborne(c)) return false
       c.shape = 'squash'
       if (look.isTall) w.tallUntil = w.t + TALL_HOLD_S
-      if (e < 0.15 || (look.isTall && w.rows < TALL_ROWS && e < 0.3)) return false
-      // A tall emote in a terminal too short for the tall band would lose its head.
-      if (look.isTall && w.rows < TALL_ROWS) return true
+      const need = tallRows(look.body)
+      if (e < 0.15 || (look.isTall && w.rows < need && e < 0.3)) return false
+      // A tall emote in a terminal too short for the band it needs would lose its head.
+      if (look.isTall && w.rows < need) return true
       puff(w, c, emoteColor(look))
       wear(w, c, look, a.dur)
       // A routine's emote step goes straight on with the routine, and so do
@@ -2416,7 +2426,7 @@ function reach({ skin, look }: Panel): [number, number] {
 // each line's number. All panels are as wide as the widest one needs, so that
 // Clawd, its arms, its tool and its prop at the start are centred together.
 function sheet(panels: (Panel | null)[], perLine: number, numbers: number): Uint8Array {
-  const rows = TALL_ROWS
+  const rows = Math.max(...panels.map(panel => tallRows((panel?.look?.body ?? panel?.skin) ?? null)))
   const spans = panels.map(panel => (panel ? reach(panel) : null))
   const cols = Math.max(PREVIEW_COLS, ...spans.map(span => (span ? Math.ceil((span[1] - span[0]) / 2) + 1 : 0)))
   const frames = panels.map((panel, k) => {
@@ -2451,7 +2461,11 @@ export const ACT_PREVIEW_COLS = 40
  */
 export function actPreview(what: Playable, skin: Skin | null = null): { png: Uint8Array; frames: number } {
   const cols = ACT_PREVIEW_COLS
-  const w = createWorld(cols, TALL_ROWS, seeded(1))
+  // As high as the tallest body it shows, so that a tall emote step plays.
+  const steps = typeof what === 'object' && 'steps' in what ? what.steps.flatMap(s => s.inner ?? [s]) : []
+  const worn = typeof what === 'object' && 'body' in what ? what.body : null
+  const rows = Math.max(tallRows(skin), tallRows(worn), ...steps.map(s => tallRows(s.worn?.body ?? null)))
+  const w = createWorld(cols, rows, seeded(1))
   w.queue = []
   w.skin = skin
   Object.assign(w, { x: cols, t: 5, lastEventAt: 5, blinkAt: 7 })
@@ -2467,7 +2481,7 @@ export function actPreview(what: Playable, skin: Skin | null = null): { png: Uin
       break
     }
   }
-  return { png: framesPng(frames, cols, TALL_ROWS, 1, 0), frames: frames.length }
+  return { png: framesPng(frames, cols, rows, 1, 0), frames: frames.length }
 }
 
 // A PNG of frames as frameCells writes them, each `cols` x `rows` cells,
