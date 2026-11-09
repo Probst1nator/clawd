@@ -5,9 +5,6 @@ Claude Code banner, runs around in a strip above your prompt and reacts to the s
 
 ![The strip above the prompt during a session](demo.gif)
 
-There is also a version in which Clawd is the MatSci octopus:
-[AutomatedAlchemy/clawd-matsci](https://github.com/AutomatedAlchemy/clawd-matsci).
-
 - It hops when you send a prompt.
 - It holds up a scroll while Claude only reads, and stacks a brick for every other tool
   call. The next prompt kicks the pile over.
