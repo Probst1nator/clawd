@@ -1908,12 +1908,15 @@ function drawWorn(w: World, c: Body, look: Skin, put: Put): void {
     // body under them and under that, so an eye never opens into a gap.
     const isBody = (ch: string | undefined) => ch === '#' || ch === 'o' || ch === '+'
     const down = eyes === 'down' && eyePixels.every(([x, y]) => isBody(rows[y + 1]?.[x]) && isBody(rows[y + 2]?.[x]))
+    // Only an eye one row tall grows when wide open. An eye two rows tall, as on
+    // the MatSci octopus, keeps its size.
+    const isTallEye = rows.some((line, y) => [...line].some((ch, x) => ch === 'o' && rows[y + 1]?.[x] === 'o'))
     for (const [hx, ey] of eyePixels) {
       const hy = down ? ey + 1 : ey
       holes.add(`${hx},${hy}`)
       // Wide open, as on Clawd's own body: a pixel down or up, never through the outline.
       const wider = isBody(rows[hy + 2]?.[hx]) ? hy + 1 : isBody(rows[hy - 2]?.[hx]) ? hy - 1 : -1
-      if (eyes === 'wide' && wider >= 0 && isBody(rows[wider]?.[hx])) holes.add(`${hx},${wider}`)
+      if (eyes === 'wide' && !isTallEye && wider >= 0 && isBody(rows[wider]?.[hx])) holes.add(`${hx},${wider}`)
     }
   }
   // The lean moves the rows above the eyes, so it never splits an eye.
@@ -2193,7 +2196,7 @@ function antennaTip(top: number): number {
  * tip sits alone in the lower half of a cell: the stalk is two pixels high, or
  * three where the head's top row is the lower half of a cell. The tip needs the
  * band's second row of headroom, so the band stays 5 rows high while the
- * antenna is on, and 6 while Clawd wears a tall look (`bandRows`).
+ * antenna is on, and on a tall look one row more than the look needs (`bandRows`).
  */
 function drawAntenna(w: World, c: Body, x: number, top: number, put: Put): void {
   const tip = antennaTip(top)

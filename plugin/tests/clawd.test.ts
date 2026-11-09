@@ -810,6 +810,27 @@ test('an emote is checked, Clawd turns into it with a puff, keeps the tall band 
   expect(colors(frameCells(w)).has(0xd77757)).toBe(true)
 })
 
+test('wide open, an eye one row tall grows a row, and an eye two rows tall stays as it is', async () => {
+  const wideAndOpen = (normal: string[]): string[] => {
+    const skin = skinFrom({ ...OCTOPUS, shapes: { normal } }) as Skin
+    return (['wide', 'open'] as const).map(eyes => {
+      const w = createWorld(40, 5, seeded(6))
+      w.queue = []
+      w.x = 30
+      setSkin(w, skin, true)
+      w.act = { kind: 'idle', t0: 0, stage: 0, dur: 99, next: 99, look: 0 }
+      step(w)
+      w.eyes = eyes
+      w.blinkAt = w.t + 99
+      return frameCells(w)
+    })
+  }
+  const [shortWide, shortOpen] = wideAndOpen(['..######..', '.#oo##oo#.', '##########', '##########'])
+  expect(shortWide).not.toBe(shortOpen)
+  const [tallWide, tallOpen] = wideAndOpen(['..######..', '.#oo##oo#.', '.#oo##oo#.', '##########', '##########'])
+  expect(tallWide).toBe(tallOpen)
+})
+
 test('a skin is Clawd\'s body from the start without a puff, an emote takes over for its time and the skin comes back, and a change of skin puffs', async () => {
   const skin = skinFrom(OCTOPUS) as Skin
   const frog = emoteFrom({ ...OCTOPUS, name: 'frog', color: '#40c060', dur: 2 }) as Emote
